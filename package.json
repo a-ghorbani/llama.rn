@@ -60,6 +60,7 @@
     "Jhen-Jie Hong <developer@jhen.me> (https://github.com/mybigday)"
   ],
   "license": "MIT",
+  "homepage": "https://github.com/a-ghorbani/llama.rn#readme",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
