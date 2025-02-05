@@ -7,6 +7,11 @@ export type NativeEmbeddingParams = {
 
 export type NativeContextParams = {
   model: string
+  /**
+   * Chat template to override the default one from the model.
+   */
+  chat_template?: string
+
   is_model_asset?: boolean
   use_progress_callback?: boolean
 
@@ -62,9 +67,27 @@ export type NativeCompletionParams = {
   prompt: string
   n_threads?: number
   /**
+   * JSON schema for convert to grammar for structured JSON output.
+   * It will be override by grammar if both are set.
+   */
+  json_schema?: string
+  /**
    * Set grammar for grammar-based sampling.  Default: no grammar
    */
   grammar?: string
+  /**
+   * Lazy grammar sampling, trigger by grammar_triggers. Default: false
+   */
+  grammar_lazy?: boolean
+  /**
+   * Lazy grammar triggers. Default: []
+   */
+  grammar_triggers?: Array<{
+    at_start: boolean
+    word: string
+  }>
+  preserved_tokens?: Array<string>
+  chat_format?: number
   /**
    * Specify a JSON array of stopping strings.
    * These words will not be included in the completion, so make sure to add them to the prompt for the next iteration. Default: `[]`
@@ -225,9 +248,44 @@ export type NativeEmbeddingResult = {
 
 export type NativeLlamaContext = {
   contextId: number
+  model: {
+    desc: string
+    size: number
+    nEmbd: number
+    nParams: number
+    chatTemplates: {
+      llamaChat: boolean // Chat template in llama-chat.cpp
+      minja: {
+        // Chat template supported by minja.hpp
+        default: boolean
+        defaultCaps: {
+          tools: boolean
+          toolCalls: boolean
+          toolResponses: boolean
+          systemRole: boolean
+          parallelToolCalls: boolean
+          toolCallId: boolean
+        }
+        toolUse: boolean
+        toolUseCaps: {
+          tools: boolean
+          toolCalls: boolean
+          toolResponses: boolean
+          systemRole: boolean
+          parallelToolCalls: boolean
+          toolCallId: boolean
+        }
+      }
+    }
+    metadata: Object
+    isChatTemplateSupported: boolean // Deprecated
+  }
+  /**
+   * Loaded library name for Android
+   */
+  androidLib?: string
   gpu: boolean
   reasonNoGPU: string
-  model: Object
 }
 
 export type NativeSessionLoadResult = {
@@ -251,8 +309,15 @@ export interface Spec extends TurboModule {
 
   getFormattedChat(
     contextId: number,
-    messages: NativeLlamaChatMessage[],
+    messages: string,
     chatTemplate?: string,
+    params?: {
+      jinja?: boolean
+      json_schema?: string
+      tools?: string
+      parallel_tool_calls?: string
+      tool_choice?: string
+    },
   ): Promise<string>
   loadSession(
     contextId: number,

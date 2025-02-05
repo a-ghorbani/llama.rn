@@ -21,6 +21,8 @@ import java.io.IOException;
 public class LlamaContext {
   public static final String NAME = "RNLlamaContext";
 
+  private static String loadedLibrary = "";
+
   private int id;
   private ReactApplicationContext reactContext;
   private long context;
@@ -42,6 +44,8 @@ public class LlamaContext {
     this.context = initContext(
       // String model,
       params.getString("model"),
+      // String chat_template,
+      params.hasKey("chat_template") ? params.getString("chat_template") : "",
       // boolean embedding,
       params.hasKey("embedding") ? params.getBoolean("embedding") : false,
       // int embd_normalize,
@@ -102,12 +106,28 @@ public class LlamaContext {
     return modelDetails;
   }
 
-  public String getFormattedChat(ReadableArray messages, String chatTemplate) {
-    ReadableMap[] msgs = new ReadableMap[messages.size()];
-    for (int i = 0; i < messages.size(); i++) {
-      msgs[i] = messages.getMap(i);
-    }
-    return getFormattedChat(this.context, msgs, chatTemplate == null ? "" : chatTemplate);
+  public String getLoadedLibrary() {
+    return loadedLibrary;
+  }
+
+  public WritableMap getFormattedChatWithJinja(String messages, String chatTemplate, ReadableMap params) {
+    String jsonSchema = params.hasKey("json_schema") ? params.getString("json_schema") : "";
+    String tools = params.hasKey("tools") ? params.getString("tools") : "";
+    Boolean parallelToolCalls = params.hasKey("parallel_tool_calls") ? params.getBoolean("parallel_tool_calls") : false;
+    String toolChoice = params.hasKey("tool_choice") ? params.getString("tool_choice") : "";
+    return getFormattedChatWithJinja(
+      this.context,
+      messages,
+      chatTemplate == null ? "" : chatTemplate,
+      jsonSchema,
+      tools,
+      parallelToolCalls,
+      toolChoice
+    );
+  }
+
+  public String getFormattedChat(String messages, String chatTemplate) {
+    return getFormattedChat(this.context, messages, chatTemplate == null ? "" : chatTemplate);
   }
 
   private void emitLoadProgress(int progress) {
@@ -197,6 +217,14 @@ public class LlamaContext {
       params.getString("prompt"),
       // String grammar,
       params.hasKey("grammar") ? params.getString("grammar") : "",
+      // String json_schema,
+      params.hasKey("json_schema") ? params.getString("json_schema") : "",
+      // boolean grammar_lazy,
+      params.hasKey("grammar_lazy") ? params.getBoolean("grammar_lazy") : false,
+      // ReadableArray grammar_triggers,
+      params.hasKey("grammar_triggers") ? params.getArray("grammar_triggers") : null,
+      // ReadableArray preserved_tokens,
+      params.hasKey("preserved_tokens") ? params.getArray("preserved_tokens") : null,
       // float temperature,
       params.hasKey("temperature") ? (float) params.getDouble("temperature") : 0.7f,
       // int n_threads,
@@ -346,27 +374,34 @@ public class LlamaContext {
       if (hasDotProd && hasI8mm) {
         Log.d(NAME, "Loading librnllama_v8_2_dotprod_i8mm.so");
         System.loadLibrary("rnllama_v8_2_dotprod_i8mm");
+        loadedLibrary = "rnllama_v8_2_dotprod_i8mm";
       } else if (hasDotProd) {
         Log.d(NAME, "Loading librnllama_v8_2_dotprod.so");
         System.loadLibrary("rnllama_v8_2_dotprod");
+        loadedLibrary = "rnllama_v8_2_dotprod";
       } else if (hasI8mm) {
         Log.d(NAME, "Loading librnllama_v8_2_i8mm.so");
         System.loadLibrary("rnllama_v8_2_i8mm");
+        loadedLibrary = "rnllama_v8_2_i8mm";
       } else if (hasFp16) {
         Log.d(NAME, "Loading librnllama_v8_2.so");
         System.loadLibrary("rnllama_v8_2");
+        loadedLibrary = "rnllama_v8_2";
       } else {
         Log.d(NAME, "Loading default librnllama_v8.so");
         System.loadLibrary("rnllama_v8");
+        loadedLibrary = "rnllama_v8";
       }
       //  Log.d(NAME, "Loading librnllama_v8_7.so with runtime feature detection");
       //  System.loadLibrary("rnllama_v8_7");
     } else if (LlamaContext.isX86_64()) {
         Log.d(NAME, "Loading librnllama_x86_64.so");
         System.loadLibrary("rnllama_x86_64");
+        loadedLibrary = "rnllama_x86_64";
     } else {
         Log.d(NAME, "Loading default librnllama.so");
         System.loadLibrary("rnllama");
+        loadedLibrary = "rnllama";
     }
 }
 
@@ -404,6 +439,7 @@ public class LlamaContext {
   );
   protected static native long initContext(
     String model,
+    String chat_template,
     boolean embedding,
     int embd_normalize,
     int n_ctx,
@@ -429,9 +465,18 @@ public class LlamaContext {
   protected static native WritableMap loadModelDetails(
     long contextPtr
   );
+  protected static native WritableMap getFormattedChatWithJinja(
+    long contextPtr,
+    String messages,
+    String chatTemplate,
+    String jsonSchema,
+    String tools,
+    boolean parallelToolCalls,
+    String toolChoice
+  );
   protected static native String getFormattedChat(
     long contextPtr,
-    ReadableMap[] messages,
+    String messages,
     String chatTemplate
   );
   protected static native WritableMap loadSession(
@@ -447,6 +492,10 @@ public class LlamaContext {
     long context_ptr,
     String prompt,
     String grammar,
+    String json_schema,
+    boolean grammar_lazy,
+    ReadableArray grammar_triggers,
+    ReadableArray preserved_tokens,
     float temperature,
     int n_threads,
     int n_predict,

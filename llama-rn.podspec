@@ -5,7 +5,7 @@ base_ld_flags = "-framework Accelerate -framework Foundation -framework Metal -f
 base_compiler_flags = "-fno-objc-arc -DLM_GGML_USE_CPU -DLM_GGML_USE_ACCELERATE -Wno-shorten-64-to-32"
 
 if ENV["RNLLAMA_DISABLE_METAL"] != "1" then
-  base_compiler_flags += " -DLM_GGML_USE_METAL" # -DLM_GGML_METAL_NDEBUG
+  base_compiler_flags += " -DLM_GGML_USE_METAL -DLM_GGML_METAL_USE_BF16" # -DLM_GGML_METAL_NDEBUG
 end
 
 # Use base_optimizer_flags = "" for debug builds
@@ -23,8 +23,14 @@ Pod::Spec.new do |s|
   s.platforms    = { :ios => "13.0", :tvos => "13.0" }
   s.source       = { :git => "https://github.com/mybigday/llama.rn.git", :tag => "#{s.version}" }
 
-  s.source_files = "ios/**/*.{h,m,mm}", "cpp/**/*.{h,cpp,hpp,c,m,mm}"
-  s.resources = "cpp/**/*.{metallib}"
+  if ENV["RNLLAMA_BUILD_FROM_SOURCE"] == "1"
+    s.source_files = "ios/**/*.{h,m,mm}", "cpp/**/*.{h,cpp,hpp,c,m,mm}"
+    s.resources = "cpp/**/*.{metallib}"
+    base_compiler_flags += " -DRNLLAMA_BUILD_FROM_SOURCE"
+  else
+    s.source_files = "ios/**/*.{h,m,mm}"
+    s.vendored_frameworks = "ios/rnllama.xcframework"
+  end
 
   s.dependency "React-Core"
 

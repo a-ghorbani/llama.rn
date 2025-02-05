@@ -8,7 +8,7 @@
 @implementation RNLlama
 
 NSMutableDictionary *llamaContexts;
-double llamaContextLimit = 1;
+double llamaContextLimit = -1;
 dispatch_queue_t llamaDQueue;
 
 RCT_EXPORT_MODULE()
@@ -48,7 +48,7 @@ RCT_EXPORT_METHOD(initContext:(double)contextId
         llamaContexts = [[NSMutableDictionary alloc] init];
     }
 
-    if (llamaContextLimit > 0 && [llamaContexts count] >= llamaContextLimit) {
+    if (llamaContextLimit > -1 && [llamaContexts count] >= llamaContextLimit) {
         reject(@"llama_error", @"Context limit reached", nil);
         return;
     }
@@ -77,8 +77,9 @@ RCT_EXPORT_METHOD(initContext:(double)contextId
 }
 
 RCT_EXPORT_METHOD(getFormattedChat:(double)contextId
-                 withMessages:(NSArray *)messages
+                 withMessages:(NSString *)messages
                  withTemplate:(NSString *)chatTemplate
+                 withParams:(NSDictionary *)params
                  withResolver:(RCTPromiseResolveBlock)resolve
                  withRejecter:(RCTPromiseRejectBlock)reject)
 {
@@ -87,7 +88,19 @@ RCT_EXPORT_METHOD(getFormattedChat:(double)contextId
         reject(@"llama_error", @"Context not found", nil);
         return;
     }
-    resolve([context getFormattedChat:messages withTemplate:chatTemplate]);
+    try {
+        if ([params[@"jinja"] boolValue]) {
+            NSString *jsonSchema = params[@"json_schema"];
+            NSString *tools = params[@"tools"];
+            NSString *parallelToolCalls = params[@"parallel_tool_calls"];
+            NSString *toolChoice = params[@"tool_choice"];\
+            resolve([context getFormattedChatWithJinja:messages withChatTemplate:chatTemplate withJsonSchema:jsonSchema withTools:tools withParallelToolCalls:parallelToolCalls withToolChoice:toolChoice]);
+        } else {
+            resolve([context getFormattedChat:messages withChatTemplate:chatTemplate]);
+        }
+    } catch (const std::exception& e) { // catch cpp exceptions
+        reject(@"llama_error", [NSString stringWithUTF8String:e.what()], nil);
+    }
 }
 
 RCT_EXPORT_METHOD(loadSession:(double)contextId

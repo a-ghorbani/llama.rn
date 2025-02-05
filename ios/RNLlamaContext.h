@@ -1,8 +1,17 @@
 #ifdef __cplusplus
+#if RNLLAMA_BUILD_FROM_SOURCE
 #import "llama.h"
 #import "llama-impl.h"
 #import "ggml.h"
-#import "rn-llama.hpp"
+#import "rn-llama.h"
+#import "json-schema-to-grammar.h"
+#else
+#import <rnllama/llama.h>
+#import <rnllama/llama-impl.h>
+#import <rnllama/ggml.h>
+#import <rnllama/rn-llama.h>
+#import <rnllama/json-schema-to-grammar.h>
+#endif
 #endif
 
 
@@ -29,7 +38,13 @@
 - (NSArray *)tokenize:(NSString *)text;
 - (NSString *)detokenize:(NSArray *)tokens;
 - (NSDictionary *)embedding:(NSString *)text params:(NSDictionary *)params;
-- (NSString *)getFormattedChat:(NSArray *)messages withTemplate:(NSString *)chatTemplate;
+- (NSDictionary *)getFormattedChatWithJinja:(NSString *)messages
+    withChatTemplate:(NSString *)chatTemplate
+    withJsonSchema:(NSString *)jsonSchema
+    withTools:(NSString *)tools
+    withParallelToolCalls:(BOOL)parallelToolCalls
+    withToolChoice:(NSString *)toolChoice;
+- (NSString *)getFormattedChat:(NSString *)messages withChatTemplate:(NSString *)chatTemplate;
 - (NSDictionary *)loadSession:(NSString *)path;
 - (int)saveSession:(NSString *)path size:(int)size;
 - (NSString *)bench:(int)pp tg:(int)tg pl:(int)pl nr:(int)nr;
