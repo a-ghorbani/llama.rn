@@ -8448,7 +8448,6 @@ static int llama_prepare_sbatch(
         const llama_batch & batch,
         uint32_t          & n_outputs) {
     const auto & model   = lctx.model;
-    const auto & vocab   = model.vocab;
     const auto & hparams = model.hparams;
     const auto & cparams = lctx.cparams;
 
