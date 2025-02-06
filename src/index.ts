@@ -13,6 +13,7 @@ import type {
   NativeEmbeddingParams,
   NativeCompletionTokenProbItem,
   NativeCompletionResultTimings,
+  JinjaFormattedChatResult,
 } from './NativeRNLlama'
 import type {
   SchemaGrammarConverterPropOrder,
@@ -36,6 +37,9 @@ export type {
   NativeCompletionResultTimings,
   RNLlamaMessagePart,
   RNLlamaOAICompatibleMessage,
+  JinjaFormattedChatResult,
+
+  // Deprecated
   SchemaGrammarConverterPropOrder,
   SchemaGrammarConverterBuiltinRule,
 }
@@ -44,6 +48,7 @@ export { SchemaGrammarConverter, convertJsonSchemaToGrammar }
 
 const EVENT_ON_INIT_CONTEXT_PROGRESS = '@RNLlama_onInitContextProgress'
 const EVENT_ON_TOKEN = '@RNLlama_onToken'
+const EVENT_ON_NATIVE_LOG = '@RNLlama_onNativeLog'
 
 let EventEmitter: NativeEventEmitter | DeviceEventEmitterStatic
 if (Platform.OS === 'ios') {
@@ -52,6 +57,19 @@ if (Platform.OS === 'ios') {
 }
 if (Platform.OS === 'android') {
   EventEmitter = DeviceEventEmitter
+}
+
+const logListeners: Array<(level: string, text: string) => void> = []
+
+// @ts-ignore
+if (EventEmitter) {
+  EventEmitter.addListener(
+    EVENT_ON_NATIVE_LOG,
+    (evt: { level: string; text: string }) => {
+      logListeners.forEach((listener) => listener(evt.level, evt.text))
+    },
+  )
+  RNLlama?.toggleNativeLog?.(false) // Trigger unset to use default log callback
 }
 
 export type TokenData = {
@@ -92,7 +110,7 @@ export type ContextParams = Omit<
 export type EmbeddingParams = NativeEmbeddingParams
 
 export type CompletionResponseFormat = {
-  type: 'text' | 'json_object' | 'json_schema',
+  type: 'text' | 'json_object' | 'json_schema'
   json_schema?: {
     strict?: boolean
     schema: object
@@ -114,7 +132,8 @@ export type CompletionBaseParams = {
 export type CompletionParams = Omit<
   NativeCompletionParams,
   'emit_partial_completion' | 'prompt'
-> & CompletionBaseParams
+> &
+  CompletionBaseParams
 
 export type BenchResult = {
   modelDesc: string
@@ -124,19 +143,6 @@ export type BenchResult = {
   ppStd: number
   tgAvg: number
   tgStd: number
-}
-
-type JinjaFormattedChatResult = {
-  prompt: string
-  chat_format?: number
-  grammar?: string
-  grammar_lazy?: boolean
-  grammar_triggers?: Array<{
-    at_start: boolean
-    word: string
-  }>
-  preserved_tokens?: Array<string>
-  additional_stops?: Array<string>
 }
 
 const getJsonSchema = (responseFormat?: CompletionResponseFormat) => {
@@ -356,6 +362,21 @@ export class LlamaContext {
 
   async release(): Promise<void> {
     return RNLlama.releaseContext(this.id)
+  }
+}
+
+export async function toggleNativeLog(enabled: boolean): Promise<void> {
+  return RNLlama.toggleNativeLog(enabled)
+}
+
+export function addNativeLogListener(
+  listener: (level: string, text: string) => void,
+): { remove: () => void } {
+  logListeners.push(listener)
+  return {
+    remove: () => {
+      logListeners.splice(logListeners.indexOf(listener), 1)
+    },
   }
 }
 
