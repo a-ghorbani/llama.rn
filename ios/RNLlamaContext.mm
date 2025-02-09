@@ -93,45 +93,67 @@
     if (params[@"n_ctx"]) defaultParams.n_ctx = [params[@"n_ctx"] intValue];
     if (params[@"use_mlock"]) defaultParams.use_mlock = [params[@"use_mlock"]boolValue];
 
+    BOOL skipGpuDevices = params[@"no_gpu_devices"] && [params[@"no_gpu_devices"] boolValue];
+
     BOOL isMetalEnabled = false;
     NSString *reasonNoMetal = @"";
     defaultParams.n_gpu_layers = 0;
-    if (params[@"n_gpu_layers"] && [params[@"n_gpu_layers"] intValue] > 0) {
 #ifdef LM_GGML_USE_METAL
-        // Check ggml-metal availability
-        NSError * error = nil;
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        id<MTLLibrary> library = [device
-            newLibraryWithSource:@"#include <metal_stdlib>\n"
-                                    "using namespace metal;"
-                                    "kernel void test() { simd_sum(0); }"
-            options:nil
-            error:&error
-        ];
-        if (error) {
+    // Check ggml-metal availability
+    NSError * error = nil;
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    id<MTLLibrary> library = [device
+        newLibraryWithSource:@"#include <metal_stdlib>\n"
+                                "using namespace metal;"
+                                "typedef matrix<bfloat, 4, 4> bfloat4x4;"
+                                "kernel void test() { simd_sum(0); }"
+        options:nil
+        error:&error
+    ];
+    if (error) {
+        reasonNoMetal = [error localizedDescription];
+        skipGpuDevices = true;
+    } else {
+        id<MTLFunction> kernel = [library newFunctionWithName:@"test"];
+        id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:kernel error:&error];
+        if (pipeline == nil) {
             reasonNoMetal = [error localizedDescription];
+            skipGpuDevices = true;
         } else {
-            id<MTLFunction> kernel = [library newFunctionWithName:@"test"];
-            id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:kernel error:&error];
-            if (pipeline == nil) {
-                reasonNoMetal = [error localizedDescription];
-            } else {
 #if TARGET_OS_SIMULATOR
-                defaultParams.n_gpu_layers = 0;
-                isMetalEnabled = false;
-                reasonNoMetal = @"Metal is not supported on simulator";
+            // Use the backend, but no layers because not supported fully on simulator
+            defaultParams.n_gpu_layers = 0;
+            isMetalEnabled = true;
 #else
-                defaultParams.n_gpu_layers = [params[@"n_gpu_layers"] intValue];
-                isMetalEnabled = true;
+            defaultParams.n_gpu_layers = [params[@"n_gpu_layers"] intValue];
+            isMetalEnabled = true;
 #endif
+        }
+    }
+    device = nil;
+#else
+    reasonNoMetal = @"Metal is not enabled in this build";
+    isMetalEnabled = false;
+#endif
+
+    if (skipGpuDevices) {
+        std::vector<lm_ggml_backend_dev_t> cpu_devs;
+        for (size_t i = 0; i < lm_ggml_backend_dev_count(); ++i) {
+            lm_ggml_backend_dev_t dev = lm_ggml_backend_dev_get(i);
+            switch (lm_ggml_backend_dev_type(dev)) {
+                case LM_GGML_BACKEND_DEVICE_TYPE_CPU:
+                case LM_GGML_BACKEND_DEVICE_TYPE_ACCEL:
+                    cpu_devs.push_back(dev);
+                    break;
+                case LM_GGML_BACKEND_DEVICE_TYPE_GPU:
+                    break;
             }
         }
-        device = nil;
-#else
-        reasonNoMetal = @"Metal is not enabled in this build";
-        isMetalEnabled = false;
-#endif
+        if (cpu_devs.size() > 0) {
+            defaultParams.devices = cpu_devs;
+        }
     }
+
     if (params[@"n_batch"]) defaultParams.n_batch = [params[@"n_batch"] intValue];
     if (params[@"n_ubatch"]) defaultParams.n_ubatch = [params[@"n_ubatch"] intValue];
     if (params[@"use_mmap"]) defaultParams.use_mmap = [params[@"use_mmap"] boolValue];
@@ -163,7 +185,6 @@
     // Use 2 threads by default on 4-core devices, 4 threads on more cores
     const int defaultNThreads = nThreads == 4 ? 2 : MIN(4, maxThreads);
     defaultParams.cpuparams.n_threads = nThreads > 0 ? nThreads : defaultNThreads;
-
 
     RNLlamaContext *context = [[RNLlamaContext alloc] init];
     context->llama = new rnllama::llama_rn_context();
@@ -588,24 +609,28 @@
 
     NSMutableArray *toolCalls = nil;
     if (!llama->is_interrupted) {
-      auto chat_format = params[@"chat_format"] ? [params[@"chat_format"] intValue] : COMMON_CHAT_FORMAT_CONTENT_ONLY;
-      common_chat_msg message = common_chat_parse(llama->generated_text, static_cast<common_chat_format>(chat_format));
-      toolCalls = [[NSMutableArray alloc] init];
-      for (const auto &tc : message.tool_calls) {
-        [toolCalls addObject:@{
-          @"type": @"function",
-          @"function": @{
-            @"name": [NSString stringWithUTF8String:tc.name.c_str()],
-            @"arguments": [NSString stringWithUTF8String:tc.arguments.c_str()],
-          },
-          @"id": tc.id.empty() ? [NSNull null] : [NSString stringWithUTF8String:tc.id.c_str()],
-        }];
-      }
+        try {
+            auto chat_format = params[@"chat_format"] ? [params[@"chat_format"] intValue] : COMMON_CHAT_FORMAT_CONTENT_ONLY;
+            common_chat_msg message = common_chat_parse(llama->generated_text, static_cast<common_chat_format>(chat_format));
+            toolCalls = [[NSMutableArray alloc] init];
+            for (const auto &tc : message.tool_calls) {
+                [toolCalls addObject:@{
+                    @"type": @"function",
+                    @"function": @{
+                        @"name": [NSString stringWithUTF8String:tc.name.c_str()],
+                        @"arguments": [NSString stringWithUTF8String:tc.arguments.c_str()],
+                    },
+                    @"id": tc.id.empty() ? [NSNull null] : [NSString stringWithUTF8String:tc.id.c_str()],
+                }];
+            }
+        } catch (const std::exception &e) {
+            // NSLog(@"Error parsing tool calls: %s", e.what());
+        }
     }
 
     NSMutableDictionary *result = [[NSMutableDictionary alloc] init];
     result[@"text"] = [NSString stringWithUTF8String:llama->generated_text.c_str()];
-    if (toolCalls) result[@"tool_calls"] = toolCalls;
+    if (toolCalls && toolCalls.count > 0) result[@"tool_calls"] = toolCalls;
     result[@"completion_probabilities"] = [self tokenProbsToDict:llama->generated_token_probs];
     result[@"tokens_predicted"] = @(llama->num_tokens_predicted);
     result[@"tokens_evaluated"] = @(llama->num_prompt_tokens);
