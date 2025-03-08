@@ -1,7 +1,7 @@
---- ggml-metal.m.orig	2025-02-06 12:19:16
-+++ ggml-metal.m	2025-02-06 12:18:32
-@@ -530,7 +530,11 @@
-         const bool try_metallib = true;
+--- ggml-metal.m.orig	2025-03-08 21:30:06
++++ ggml-metal.m	2025-03-08 21:32:07
+@@ -550,7 +550,11 @@ @implementation LMGGMLMetalClass
+         NSBundle * bundle = [NSBundle bundleForClass:[LMGGMLMetalClass class]];
  #endif
  
 -        NSString * path_lib = [bundle pathForResource:@"default" ofType:@"metallib"];

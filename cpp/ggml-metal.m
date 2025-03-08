@@ -550,7 +550,11 @@ static struct lm_ggml_backend_metal_context * lm_ggml_metal_init(lm_ggml_backend
         NSBundle * bundle = [NSBundle bundleForClass:[LMGGMLMetalClass class]];
 #endif
 
-        NSString * path_lib = [bundle pathForResource:@"default" ofType:@"metallib"];
+#if TARGET_OS_SIMULATOR
+        NSString * path_lib = [bundle pathForResource:@"ggml-llama-sim" ofType:@"metallib"];
+#else
+        NSString * path_lib = [bundle pathForResource:@"ggml-llama" ofType:@"metallib"];
+#endif
         if (path_lib == nil) {
             // Try to find the resource in the directory where the current binary located.
             NSString * current_binary = [[NSProcessInfo processInfo] arguments][0];
