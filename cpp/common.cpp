@@ -57,12 +57,6 @@
 #include <future>
 #endif
 
-// build info
-int LLAMA_BUILD_NUMBER = 0;
-char const *LLAMA_COMMIT = "unknown";
-char const *LLAMA_COMPILER = "unknown";
-char const *LLAMA_BUILD_TARGET = "unknown";
-
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
@@ -1095,8 +1089,6 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     if (params.n_gpu_layers != -1) {
         mparams.n_gpu_layers = params.n_gpu_layers;
     }
-
-    mparams.vocab_only      = params.vocab_only;
     mparams.main_gpu        = params.main_gpu;
     mparams.split_mode      = params.split_mode;
     mparams.tensor_split    = params.tensor_split;
@@ -1108,11 +1100,6 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     } else {
         LM_GGML_ASSERT(params.kv_overrides.back().key[0] == 0 && "KV overrides not terminated with empty key");
         mparams.kv_overrides = params.kv_overrides.data();
-    }
-
-    if (params.progress_callback != nullptr) {
-        mparams.progress_callback = params.progress_callback;
-        mparams.progress_callback_user_data = params.progress_callback_user_data;
     }
 
     return mparams;

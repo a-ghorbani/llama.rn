@@ -46,6 +46,7 @@ static struct lm_ggml_backend_device g_lm_ggml_backend_metal_device;
 static struct lm_ggml_backend_metal_device_context {
     id<MTLDevice> mtl_device;
     int           mtl_device_ref_count;
+    id<MTLLibrary> mtl_library;
 
     bool has_simdgroup_reduction;
     bool has_simdgroup_mm;
@@ -57,6 +58,7 @@ static struct lm_ggml_backend_metal_device_context {
 } g_lm_ggml_ctx_dev_main = {
     /*.mtl_device              =*/ nil,
     /*.mtl_device_ref_count    =*/ 0,
+    /*.mtl_library             =*/ nil,
     /*.has_simdgroup_reduction =*/ false,
     /*.has_simdgroup_mm        =*/ false,
     /*.has_residency_sets      =*/ false,
@@ -108,6 +110,11 @@ static void lm_ggml_backend_metal_device_rel(struct lm_ggml_backend_metal_device
     ctx->mtl_device_ref_count--;
 
     if (ctx->mtl_device_ref_count == 0) {
+        if (ctx->mtl_library) {
+            [ctx->mtl_library release];
+            ctx->mtl_library = nil;
+        }
+
         if (ctx->mtl_device) {
             [ctx->mtl_device release];
             ctx->mtl_device = nil;
@@ -495,6 +502,139 @@ static void * lm_ggml_metal_host_malloc(size_t n) {
     return data;
 }
 
+// load library
+//
+// - first check if the library is embedded
+// - then check if the library is in the bundle
+// - if not found, load the source and compile it
+// - if that fails, return NULL
+static id<MTLLibrary> lm_ggml_metal_load_library(id<MTLDevice> device, bool use_bfloat) {
+    id<MTLLibrary> metal_library = nil;
+    NSError * error = nil;
+    NSString * src = nil;
+
+#if LM_GGML_METAL_EMBED_LIBRARY
+    LM_GGML_LOG_INFO("%s: using embedded metal library\n", __func__);
+
+    extern const char lm_ggml_metallib_start[];
+    extern const char lm_ggml_metallib_end[];
+
+    src = [[NSString alloc] initWithBytes:lm_ggml_metallib_start length:(lm_ggml_metallib_end-lm_ggml_metallib_start) encoding:NSUTF8StringEncoding];
+
+#else
+
+#ifdef SWIFT_PACKAGE
+    NSBundle * bundle = SWIFTPM_MODULE_BUNDLE;
+#else
+    NSBundle * bundle = [NSBundle bundleForClass:[LMGGMLMetalClass class]];
+#endif
+
+    NSString * path_lib = [bundle pathForResource:@"default" ofType:@"metallib"];
+    if (path_lib == nil) {
+        // Try to find the resource in the directory where the current binary located.
+        NSString * current_binary = [[NSProcessInfo processInfo] arguments][0];
+        NSString * bin_dir = [current_binary stringByDeletingLastPathComponent];
+        NSString * default_metallib_path = [NSString pathWithComponents:@[bin_dir, @"default.metallib"]];
+        if ([[NSFileManager defaultManager] isReadableFileAtPath:default_metallib_path]) {
+            LM_GGML_LOG_INFO("%s: found '%s'\n", __func__, [default_metallib_path UTF8String]);
+            NSDictionary * atts = [[NSFileManager defaultManager] attributesOfItemAtPath:default_metallib_path error:&error];
+            if (atts && atts[NSFileType] == NSFileTypeSymbolicLink) {
+                // Optionally, if this is a symlink, try to resolve it.
+                default_metallib_path = [[NSFileManager defaultManager] destinationOfSymbolicLinkAtPath:default_metallib_path error:&error];
+                if (default_metallib_path && [default_metallib_path length] > 0 && ![[default_metallib_path substringToIndex:1] isEqualToString:@"/"]) {
+                    // It is a relative path, adding the binary directory as directory prefix.
+                    default_metallib_path = [NSString pathWithComponents:@[bin_dir, default_metallib_path]];
+                }
+                if (!default_metallib_path || ![[NSFileManager defaultManager] isReadableFileAtPath:default_metallib_path]) {
+                    // Link to the resource could not be resolved.
+                    default_metallib_path = nil;
+                } else {
+                    LM_GGML_LOG_INFO("%s: symlink resolved '%s'\n", __func__, [default_metallib_path UTF8String]);
+                }
+            }
+        } else {
+            // The resource couldn't be found in the binary's directory.
+            default_metallib_path = nil;
+        }
+        path_lib = default_metallib_path;
+    }
+
+    if (path_lib != nil) {
+        // pre-compiled library found
+        NSURL * libURL = [NSURL fileURLWithPath:path_lib];
+        LM_GGML_LOG_INFO("%s: loading '%s'\n", __func__, [path_lib UTF8String]);
+
+        metal_library = [device newLibraryWithURL:libURL error:&error];
+        if (error) {
+            LM_GGML_LOG_ERROR("%s: error: %s\n", __func__, [[error description] UTF8String]);
+            return NULL;
+        }
+    } else {
+        LM_GGML_LOG_INFO("%s: default.metallib not found, loading from source\n", __func__);
+
+        NSString * path_source;
+        NSString * path_resource = [[NSProcessInfo processInfo].environment objectForKey:@"LM_GGML_METAL_PATH_RESOURCES"];
+
+        LM_GGML_LOG_INFO("%s: LM_GGML_METAL_PATH_RESOURCES = %s\n", __func__, path_resource ? [path_resource UTF8String] : "nil");
+
+        if (path_resource) {
+            path_source = [path_resource stringByAppendingPathComponent:@"ggml-metal.metal"];
+        } else {
+            path_source = [bundle pathForResource:@"ggml-metal" ofType:@"metal"];
+        }
+
+        if (path_source == nil) {
+            LM_GGML_LOG_WARN("%s: error: could not use bundle path to find ggml-metal.metal, falling back to trying cwd\n", __func__);
+            path_source = @"ggml-metal.metal";
+        }
+
+        LM_GGML_LOG_INFO("%s: loading '%s'\n", __func__, [path_source UTF8String]);
+
+        src = [NSString stringWithContentsOfFile:path_source encoding:NSUTF8StringEncoding error:&error];
+        if (error) {
+            LM_GGML_LOG_ERROR("%s: error: %s\n", __func__, [[error description] UTF8String]);
+            return NULL;
+        }
+    }
+#endif
+
+    if (!metal_library) {
+        @autoreleasepool {
+            // dictionary of preprocessor macros
+            NSMutableDictionary * prep = [NSMutableDictionary dictionary];
+
+            if (use_bfloat) {
+                [prep setObject:@"1" forKey:@"LM_GGML_METAL_USE_BF16"];
+            }
+
+#if LM_GGML_METAL_EMBED_LIBRARY
+            [prep setObject:@"1" forKey:@"LM_GGML_METAL_EMBED_LIBRARY"];
+#endif
+
+            MTLCompileOptions * options = [MTLCompileOptions new];
+            options.preprocessorMacros = prep;
+
+            //[options setFastMathEnabled:false];
+
+            metal_library = [device newLibraryWithSource:src options:options error:&error];
+            if (error) {
+                LM_GGML_LOG_ERROR("%s: error: %s\n", __func__, [[error description] UTF8String]);
+                return NULL;
+            }
+
+#if !__has_feature(objc_arc)
+            [options release];
+#endif
+        }
+    }
+
+#if LM_GGML_METAL_EMBED_LIBRARY
+    [src release];
+#endif // LM_GGML_METAL_EMBED_LIBRARY
+
+    return metal_library;
+}
+
 static struct lm_ggml_backend_metal_context * lm_ggml_metal_init(lm_ggml_backend_dev_t dev) {
     LM_GGML_LOG_INFO("%s: allocating\n", __func__);
 
@@ -522,140 +662,14 @@ static struct lm_ggml_backend_metal_context * lm_ggml_metal_init(lm_ggml_backend
 
     ctx->d_queue = dispatch_queue_create("ggml-metal", DISPATCH_QUEUE_CONCURRENT);
 
-    id<MTLLibrary> metal_library = nil;
-
     // load library
-    //
-    // - first check if the library is embedded
-    // - then check if the library is in the bundle
-    // - if not found, load the source and compile it
-    // - if that fails, return NULL
-    {
-        NSError * error = nil;
-        NSString * src = nil;
-
-#if LM_GGML_METAL_EMBED_LIBRARY
-        LM_GGML_LOG_INFO("%s: using embedded metal library\n", __func__);
-
-        extern const char lm_ggml_metallib_start[];
-        extern const char lm_ggml_metallib_end[];
-
-        src = [[NSString alloc] initWithBytes:lm_ggml_metallib_start length:(lm_ggml_metallib_end-lm_ggml_metallib_start) encoding:NSUTF8StringEncoding];
-
-#else
-
-#ifdef SWIFT_PACKAGE
-        NSBundle * bundle = SWIFTPM_MODULE_BUNDLE;
-#else
-        NSBundle * bundle = [NSBundle bundleForClass:[LMGGMLMetalClass class]];
-#endif
-
-#if TARGET_OS_SIMULATOR
-        NSString * path_lib = [bundle pathForResource:@"ggml-llama-sim" ofType:@"metallib"];
-#else
-        NSString * path_lib = [bundle pathForResource:@"ggml-llama" ofType:@"metallib"];
-#endif
-        if (path_lib == nil) {
-            // Try to find the resource in the directory where the current binary located.
-            NSString * current_binary = [[NSProcessInfo processInfo] arguments][0];
-            NSString * bin_dir = [current_binary stringByDeletingLastPathComponent];
-            NSString * default_metallib_path = [NSString pathWithComponents:@[bin_dir, @"default.metallib"]];
-            if ([[NSFileManager defaultManager] isReadableFileAtPath:default_metallib_path]) {
-                LM_GGML_LOG_INFO("%s: found '%s'\n", __func__, [default_metallib_path UTF8String]);
-                NSDictionary * atts = [[NSFileManager defaultManager] attributesOfItemAtPath:default_metallib_path error:&error];
-                if (atts && atts[NSFileType] == NSFileTypeSymbolicLink) {
-                    // Optionally, if this is a symlink, try to resolve it.
-                    default_metallib_path = [[NSFileManager defaultManager] destinationOfSymbolicLinkAtPath:default_metallib_path error:&error];
-                    if (default_metallib_path && [default_metallib_path length] > 0 && ![[default_metallib_path substringToIndex:1] isEqualToString:@"/"]) {
-                        // It is a relative path, adding the binary directory as directory prefix.
-                        default_metallib_path = [NSString pathWithComponents:@[bin_dir, default_metallib_path]];
-                    }
-                    if (!default_metallib_path || ![[NSFileManager defaultManager] isReadableFileAtPath:default_metallib_path]) {
-                        // Link to the resource could not be resolved.
-                        default_metallib_path = nil;
-                    } else {
-                        LM_GGML_LOG_INFO("%s: symlink resolved '%s'\n", __func__, [default_metallib_path UTF8String]);
-                    }
-                }
-            } else {
-                // The resource couldn't be found in the binary's directory.
-                default_metallib_path = nil;
-            }
-            path_lib = default_metallib_path;
-        }
-
-        if (path_lib != nil) {
-            // pre-compiled library found
-            NSURL * libURL = [NSURL fileURLWithPath:path_lib];
-            LM_GGML_LOG_INFO("%s: loading '%s'\n", __func__, [path_lib UTF8String]);
-
-            metal_library = [device newLibraryWithURL:libURL error:&error];
-            if (error) {
-                LM_GGML_LOG_ERROR("%s: error: %s\n", __func__, [[error description] UTF8String]);
-                return NULL;
-            }
-        } else {
-            LM_GGML_LOG_INFO("%s: default.metallib not found, loading from source\n", __func__);
-
-            NSString * path_source;
-            NSString * path_resource = [[NSProcessInfo processInfo].environment objectForKey:@"LM_GGML_METAL_PATH_RESOURCES"];
-
-            LM_GGML_LOG_INFO("%s: LM_GGML_METAL_PATH_RESOURCES = %s\n", __func__, path_resource ? [path_resource UTF8String] : "nil");
-
-            if (path_resource) {
-                path_source = [path_resource stringByAppendingPathComponent:@"ggml-metal.metal"];
-            } else {
-                path_source = [bundle pathForResource:@"ggml-metal" ofType:@"metal"];
-            }
-
-            if (path_source == nil) {
-                LM_GGML_LOG_WARN("%s: error: could not use bundle path to find ggml-metal.metal, falling back to trying cwd\n", __func__);
-                path_source = @"ggml-metal.metal";
-            }
-
-            LM_GGML_LOG_INFO("%s: loading '%s'\n", __func__, [path_source UTF8String]);
-
-            src = [NSString stringWithContentsOfFile:path_source encoding:NSUTF8StringEncoding error:&error];
-            if (error) {
-                LM_GGML_LOG_ERROR("%s: error: %s\n", __func__, [[error description] UTF8String]);
-                return NULL;
-            }
-        }
-#endif
-
-        if (!metal_library) {
-            @autoreleasepool {
-                // dictionary of preprocessor macros
-                NSMutableDictionary * prep = [NSMutableDictionary dictionary];
-
-                if (ctx_dev->use_bfloat) {
-                    [prep setObject:@"1" forKey:@"LM_GGML_METAL_USE_BF16"];
-                }
-
-#if LM_GGML_METAL_EMBED_LIBRARY
-                [prep setObject:@"1" forKey:@"LM_GGML_METAL_EMBED_LIBRARY"];
-#endif
-
-                MTLCompileOptions * options = [MTLCompileOptions new];
-                options.preprocessorMacros = prep;
-
-                //[options setFastMathEnabled:false];
-
-                metal_library = [device newLibraryWithSource:src options:options error:&error];
-                if (error) {
-                    LM_GGML_LOG_ERROR("%s: error: %s\n", __func__, [[error description] UTF8String]);
-                    return NULL;
-                }
-
-#if !__has_feature(objc_arc)
-                [options release];
-#endif
-            }
-        }
-
-#if LM_GGML_METAL_EMBED_LIBRARY
-        [src release];
-#endif // LM_GGML_METAL_EMBED_LIBRARY
+    if (ctx_dev->mtl_library == nil) {
+        ctx_dev->mtl_library = lm_ggml_metal_load_library(device, ctx_dev->use_bfloat);
+    }
+    id<MTLLibrary> metal_library = ctx_dev->mtl_library;
+    if (metal_library == nil) {
+        LM_GGML_LOG_ERROR("%s: error: metal library is nil\n", __func__);
+        return NULL;
     }
 
     // print MTL GPU family:
@@ -729,7 +743,6 @@ static struct lm_ggml_backend_metal_context * lm_ggml_metal_init(lm_ggml_backend
             [metal_function release]; \
             if (error) { \
                 LM_GGML_LOG_ERROR("%s: error: load pipeline error: %s\n", __func__, [[error description] UTF8String]); \
-                [metal_library release]; \
                 return NULL; \
             } \
         } else { \
@@ -1047,8 +1060,6 @@ static struct lm_ggml_backend_metal_context * lm_ggml_metal_init(lm_ggml_backend
         LM_GGML_METAL_ADD_KERNEL(LM_GGML_METAL_KERNEL_TYPE_POOL_2D_AVG_F32,               pool_2d_avg_f32,                true);
         LM_GGML_METAL_ADD_KERNEL(LM_GGML_METAL_KERNEL_TYPE_POOL_2D_MAX_F32,               pool_2d_max_f32,                true);
     }
-
-    [metal_library release];
 
     return ctx;
 }

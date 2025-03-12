@@ -42,17 +42,6 @@ extern const char * LLAMA_BUILD_TARGET;
 
 struct common_control_vector_load_info;
 
-#define print_build_info() do {                                                                     \
-    fprintf(stderr, "%s: build = %d (%s)\n", __func__, LLAMA_BUILD_NUMBER, LLAMA_COMMIT);           \
-    fprintf(stderr, "%s: built with %s for %s\n", __func__, LLAMA_COMPILER, LLAMA_BUILD_TARGET);    \
-} while(0)
-
-// build info
-extern int LLAMA_BUILD_NUMBER;
-extern char const *LLAMA_COMMIT;
-extern char const *LLAMA_COMPILER;
-extern char const *LLAMA_BUILD_TARGET;
-
 //
 // CPU utils
 //
@@ -233,7 +222,6 @@ enum common_reasoning_format {
 };
 
 struct common_params {
-    bool vocab_only               = false;
     int32_t n_predict             =    -1; // new tokens to predict
     int32_t n_ctx                 =  4096; // context size
     int32_t n_batch               =  2048; // logical batch size for prompt processing (must be >=32 to use BLAS)
@@ -353,9 +341,6 @@ struct common_params {
 
     bool single_turn       = false; // single turn chat conversation
 
-    llama_progress_callback progress_callback = nullptr;
-    void * progress_callback_user_data = nullptr;
-
     lm_ggml_type cache_type_k = LM_GGML_TYPE_F16; // KV cache data type for the K
     lm_ggml_type cache_type_v = LM_GGML_TYPE_F16; // KV cache data type for the V
 
@@ -422,8 +407,6 @@ struct common_params {
     int32_t i_pos  = -1;  // position of the passkey in the junk text
 
     // imatrix params
-    std::string out_file = "imatrix.dat"; // save the resulting imatrix to this file
-
     int32_t n_out_freq  = 10; // output the imatrix every n_out_freq iterations
     int32_t n_save_freq =  0; // save the imatrix every n_save_freq iterations
     int32_t i_chunk     =  0; // start processing from this chunk
@@ -435,16 +418,16 @@ struct common_params {
     int n_pca_batch = 100;
     int n_pca_iterations = 1000;
     dimre_method cvector_dimre_method = DIMRE_METHOD_PCA;
-    std::string cvector_outfile       = "control_vector.gguf";
     std::string cvector_positive_file = "examples/cvector-generator/positive.txt";
     std::string cvector_negative_file = "examples/cvector-generator/negative.txt";
 
     bool spm_infill = false; // suffix/prefix/middle pattern for infill
 
-    std::string lora_outfile = "ggml-lora-merged-f16.gguf";
-
     // batched-bench params
     bool batched_bench_output_jsonl = false;
+
+    // common params
+    std::string out_file; // output filename for all example programs
 };
 
 // call once at the start of a program if it uses libcommon
