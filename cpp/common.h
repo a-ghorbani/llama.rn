@@ -42,6 +42,17 @@ extern const char * LLAMA_BUILD_TARGET;
 
 struct common_control_vector_load_info;
 
+#define print_build_info() do {                                                                     \
+    fprintf(stderr, "%s: build = %d (%s)\n", __func__, LLAMA_BUILD_NUMBER, LLAMA_COMMIT);           \
+    fprintf(stderr, "%s: built with %s for %s\n", __func__, LLAMA_COMPILER, LLAMA_BUILD_TARGET);    \
+} while(0)
+
+// build info
+extern int LLAMA_BUILD_NUMBER;
+extern char const *LLAMA_COMMIT;
+extern char const *LLAMA_COMPILER;
+extern char const *LLAMA_BUILD_TARGET;
+
 //
 // CPU utils
 //
@@ -222,6 +233,7 @@ enum common_reasoning_format {
 };
 
 struct common_params {
+    bool vocab_only               = false;
     int32_t n_predict             =    -1; // new tokens to predict
     int32_t n_ctx                 =  4096; // context size
     int32_t n_batch               =  2048; // logical batch size for prompt processing (must be >=32 to use BLAS)
@@ -340,6 +352,9 @@ struct common_params {
     bool check_tensors     = false; // validate tensor data
 
     bool single_turn       = false; // single turn chat conversation
+
+    llama_progress_callback progress_callback = nullptr;
+    void * progress_callback_user_data = nullptr;
 
     lm_ggml_type cache_type_k = LM_GGML_TYPE_F16; // KV cache data type for the K
     lm_ggml_type cache_type_v = LM_GGML_TYPE_F16; // KV cache data type for the V
