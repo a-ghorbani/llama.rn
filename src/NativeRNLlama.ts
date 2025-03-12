@@ -73,6 +73,11 @@ export type NativeContextParams = {
   embd_normalize?: number
 }
 
+export type GrammarTrigger = {
+  type?: number; // 0=TOKEN, 1=WORD, 2=PATTERN, 3=PATTERN_START
+  value: string;
+};
+
 export type NativeCompletionParams = {
   prompt: string
   n_threads?: number
@@ -92,10 +97,7 @@ export type NativeCompletionParams = {
   /**
    * Lazy grammar triggers. Default: []
    */
-  grammar_triggers?: Array<{
-    at_start: boolean
-    word: string
-  }>
+  grammar_triggers?: Array<GrammarTrigger>
   preserved_tokens?: Array<string>
   chat_format?: number
   /**
@@ -340,10 +342,7 @@ export type JinjaFormattedChatResult = {
   chat_format?: number
   grammar?: string
   grammar_lazy?: boolean
-  grammar_triggers?: Array<{
-    at_start: boolean
-    word: string
-  }>
+  grammar_triggers?: Array<GrammarTrigger>
   preserved_tokens?: Array<string>
   additional_stops?: Array<string>
 }

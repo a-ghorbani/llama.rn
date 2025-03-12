@@ -375,7 +375,8 @@ struct common_chat_templates {
     NSMutableArray *grammar_triggers = [[NSMutableArray alloc] init];
     for (const auto & trigger : chatParams.grammar_triggers) {
         [grammar_triggers addObject:@{
-            @"word": [NSString stringWithUTF8String:trigger.value.c_str()],
+            @"type": @(trigger.type),
+            @"value": [NSString stringWithUTF8String:trigger.value.c_str()],
         }];
     }
     result[@"grammar_triggers"] = grammar_triggers;
@@ -498,15 +499,21 @@ struct common_chat_templates {
         NSArray *grammar_triggers = params[@"grammar_triggers"];
         for (NSDictionary *grammar_trigger in grammar_triggers) {
             common_grammar_trigger trigger;
-            trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_WORD;
-            trigger.value = [grammar_trigger[@"word"] UTF8String];
+            // Set the type based on the input or default to WORD
+            if (grammar_trigger[@"type"]) {
+                trigger.type = (common_grammar_trigger_type)[grammar_trigger[@"type"] intValue];
+            } else {
+                trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_WORD;
+            }
+            // Set the value
+            trigger.value = [grammar_trigger[@"value"] UTF8String];
             
             auto ids = common_tokenize(llama->ctx, trigger.value.c_str(), /* add_special= */ false, /* parse_special= */ true);
             if (ids.size() == 1) {
                 // Single token - create a token-type trigger
                 common_grammar_trigger token_trigger;
                 token_trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
-                token_trigger.value = ids[0];  // Set the token ID as the value
+                token_trigger.token = ids[0];  // Set the token ID in the token field
                 sparams.grammar_triggers.push_back(token_trigger);
                 sparams.preserved_tokens.insert(ids[0]);
                 continue;

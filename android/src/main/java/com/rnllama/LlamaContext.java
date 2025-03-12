@@ -21,6 +21,12 @@ import java.io.IOException;
 public class LlamaContext {
   public static final String NAME = "RNLlamaContext";
 
+  // Grammar trigger type constants. These are defined in common.h (common_grammar_trigger_type)
+  public static final int GRAMMAR_TRIGGER_TYPE_TOKEN = 0;
+  public static final int GRAMMAR_TRIGGER_TYPE_WORD = 1;
+  public static final int GRAMMAR_TRIGGER_TYPE_PATTERN = 2;
+  public static final int GRAMMAR_TRIGGER_TYPE_PATTERN_START = 3;
+
   private static String loadedLibrary = "";
 
   private static class NativeLogCallback {

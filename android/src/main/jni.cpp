@@ -737,31 +737,32 @@ Java_com_rnllama_LlamaContext_doCompletion(
         for (int i = 0; i < grammar_triggers_size; i++) {
             common_grammar_trigger trigger;
             auto trigger_map = readablearray::getMap(env, grammar_triggers, i);
-            jstring trigger_word = readablemap::getString(env, trigger_map, "word", nullptr);
-            jboolean trigger_at_start = readablemap::getBool(env, trigger_map, "at_start", false);
-            const char* word = env->GetStringUTFChars(trigger_word, nullptr);
             
-            trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_WORD;
-            trigger.value = word;  // This assumes value is a std::string
+            // Get type (default to WORD if not specified)
+            jint trigger_type = readablemap::getInt(env, trigger_map, "type", COMMON_GRAMMAR_TRIGGER_TYPE_WORD);
             
-            // Update the putString call to use value instead of word
-            putString(env, trigger_map, "word", trigger.value.c_str());
-            putBoolean(env, trigger_map, "at_start", trigger_at_start);
+            // Get value
+            jstring trigger_value = readablemap::getString(env, trigger_map, "value", nullptr);
+            const char* value = env->GetStringUTFChars(trigger_value, nullptr);
             
-            auto ids = common_tokenize(llama->ctx, word, /* add_special= */ false, /* parse_special= */ true);
-            if (ids.size() == 1) {
+            trigger.type = static_cast<common_grammar_trigger_type>(trigger_type);
+            trigger.value = value;
+            
+            auto ids = common_tokenize(llama->ctx, value, /* add_special= */ false, /* parse_special= */ true);
+            if (ids.size() == 1 && trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_WORD) {
                 // Single token - create a token-type trigger
                 common_grammar_trigger token_trigger;
                 token_trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
-                token_trigger.value = ids[0];  // Set the token ID as the value
+                token_trigger.token = ids[0];  // Set the token ID
                 sparams.grammar_triggers.push_back(token_trigger);
                 sparams.preserved_tokens.insert(ids[0]);
-                continue;
+            } else {
+                // Add the trigger as is
+                sparams.grammar_triggers.push_back(trigger);
             }
-            sparams.grammar_triggers.push_back(trigger);
             
             // Release the string
-            env->ReleaseStringUTFChars(trigger_word, word);
+            env->ReleaseStringUTFChars(trigger_value, value);
         }
     }
 
