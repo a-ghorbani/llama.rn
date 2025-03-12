@@ -1,5 +1,17 @@
 #import "RNLlamaContext.h"
 #import <Metal/Metal.h>
+#if RNLLAMA_BUILD_FROM_SOURCE
+#import "chat-template.hpp"
+#else
+#import <rnllama/chat-template.hpp>
+#endif
+
+typedef minja::chat_template common_chat_template;
+struct common_chat_templates {
+    bool has_explicit_template; // Model had builtin template or template override was specified.
+    std::unique_ptr<common_chat_template> template_default; // always set (defaults to chatml)
+    std::unique_ptr<common_chat_template> template_tool_use;
+};
 
 @implementation RNLlamaContext
 
@@ -285,7 +297,7 @@
         [meta setValue:valStr forKey:keyStr];
     }
 
-    auto template_tool_use = llama->templates.template_tool_use.get();
+    auto template_tool_use = llama->templates->template_tool_use.get();
     NSDictionary *tool_use_caps_dir = nil;
     if (template_tool_use) {
         auto tool_use_caps = template_tool_use->original_caps();
@@ -299,7 +311,7 @@
         };
     }
 
-    auto default_tmpl = llama->templates.template_default.get();
+    auto default_tmpl = llama->templates->template_default.get();
     auto default_tmpl_caps = default_tmpl->original_caps();
 
     return @{
@@ -356,15 +368,14 @@
         parallelToolCalls,
         toolChoice == nil ? "" : [toolChoice UTF8String]
     );
-    result[@"prompt"] = [NSString stringWithUTF8String:chatParams.prompt.get<std::string>().c_str()];
+    result[@"prompt"] = [NSString stringWithUTF8String:chatParams.prompt.c_str()];
     result[@"chat_format"] = @(static_cast<int>(chatParams.format));
     result[@"grammar"] = [NSString stringWithUTF8String:chatParams.grammar.c_str()];
     result[@"grammar_lazy"] = @(chatParams.grammar_lazy);
     NSMutableArray *grammar_triggers = [[NSMutableArray alloc] init];
     for (const auto & trigger : chatParams.grammar_triggers) {
         [grammar_triggers addObject:@{
-            @"word": [NSString stringWithUTF8String:trigger.word.c_str()],
-            @"at_start": @(trigger.at_start),
+            @"word": [NSString stringWithUTF8String:trigger.value.c_str()],
         }];
     }
     result[@"grammar_triggers"] = grammar_triggers;
@@ -476,7 +487,7 @@
     }
 
     if (params[@"json_schema"] && !params[@"grammar"]) {
-        sparams.grammar = json_schema_to_grammar(json::parse([params[@"json_schema"] UTF8String]));
+        sparams.grammar = json_schema_to_grammar(nlohmann::json::parse([params[@"json_schema"] UTF8String]));
     }
 
     if (params[@"grammar_lazy"]) {
@@ -487,18 +498,21 @@
         NSArray *grammar_triggers = params[@"grammar_triggers"];
         for (NSDictionary *grammar_trigger in grammar_triggers) {
             common_grammar_trigger trigger;
-            trigger.word = [grammar_trigger[@"word"] UTF8String];
-            trigger.at_start = [grammar_trigger[@"at_start"] boolValue];
-
-            auto ids = common_tokenize(llama->ctx, trigger.word, /* add_special= */ false, /* parse_special= */ true);
+            trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_WORD;
+            trigger.value = [grammar_trigger[@"word"] UTF8String];
+            
+            auto ids = common_tokenize(llama->ctx, trigger.value.c_str(), /* add_special= */ false, /* parse_special= */ true);
             if (ids.size() == 1) {
-                // LOG_DBG("Grammar trigger token: %d (`%s`)\n", ids[0], trigger.word.c_str());
-                sparams.grammar_trigger_tokens.push_back(ids[0]);
+                // Single token - create a token-type trigger
+                common_grammar_trigger token_trigger;
+                token_trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
+                token_trigger.value = ids[0];  // Set the token ID as the value
+                sparams.grammar_triggers.push_back(token_trigger);
                 sparams.preserved_tokens.insert(ids[0]);
                 continue;
             }
-            // LOG_DBG("Grammar trigger word: `%s`\n", trigger.word.c_str());
-            sparams.grammar_trigger_words.push_back(trigger);
+            // Add the word-type trigger
+            sparams.grammar_triggers.push_back(trigger);
         }
     }
 

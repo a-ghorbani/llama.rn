@@ -13,9 +13,17 @@
 #include "llama-impl.h"
 #include "ggml.h"
 #include "rn-llama.h"
+#include "chat-template.hpp"
 #include "jni-utils.h"
 #define UNUSED(x) (void)(x)
 #define TAG "RNLLAMA_ANDROID_JNI"
+
+typedef minja::chat_template common_chat_template;
+struct common_chat_templates {
+    bool has_explicit_template; // Model had builtin template or template overridde was specified.
+    std::unique_ptr<common_chat_template> template_default; // always set (defaults to chatml)
+    std::unique_ptr<common_chat_template> template_tool_use;
+};
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,     TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,     TAG, __VA_ARGS__)
@@ -437,7 +445,7 @@ Java_com_rnllama_LlamaContext_loadModelDetails(
 
     auto default_caps = createWriteableMap(env);
 
-    auto default_tmpl = llama->templates.template_default.get();
+    auto default_tmpl = llama->templates->template_default.get();
     auto default_tmpl_caps = default_tmpl->original_caps();
     putBoolean(env, default_caps, "tools", default_tmpl_caps.supports_tools);
     putBoolean(env, default_caps, "toolCalls", default_tmpl_caps.supports_tool_calls);
@@ -448,7 +456,7 @@ Java_com_rnllama_LlamaContext_loadModelDetails(
     putMap(env, minja, "defaultCaps", default_caps);
 
     putBoolean(env, minja, "toolUse", llama->validateModelChatTemplate(true, "tool_use"));
-    auto tool_use_tmpl = llama->templates.template_tool_use.get();
+    auto tool_use_tmpl = llama->templates->template_tool_use.get();
     if (tool_use_tmpl != nullptr) {
       auto tool_use_caps = createWriteableMap(env);
       auto tool_use_tmpl_caps = tool_use_tmpl->original_caps();
@@ -502,15 +510,15 @@ Java_com_rnllama_LlamaContext_getFormattedChatWithJinja(
             parallel_tool_calls,
             tool_choice_chars
         );
-        putString(env, result, "prompt", formatted.prompt.get<std::string>().c_str());
+        putString(env, result, "prompt", formatted.prompt.c_str());
         putInt(env, result, "chat_format", static_cast<int>(formatted.format));
         putString(env, result, "grammar", formatted.grammar.c_str());
         putBoolean(env, result, "grammar_lazy", formatted.grammar_lazy);
         auto grammar_triggers = createWritableArray(env);
         for (const auto &trigger : formatted.grammar_triggers) {
             auto trigger_map = createWriteableMap(env);
-            putString(env, trigger_map, "word", trigger.word.c_str());
-            putBoolean(env, trigger_map, "at_start", trigger.at_start);
+            putString(env, trigger_map, "word", trigger.value.c_str());
+            //putBoolean(env, trigger_map, "at_start", trigger.at_start);
             pushMap(env, grammar_triggers, trigger_map);
         }
         putArray(env, result, "grammar_triggers", grammar_triggers);
@@ -731,16 +739,29 @@ Java_com_rnllama_LlamaContext_doCompletion(
             auto trigger_map = readablearray::getMap(env, grammar_triggers, i);
             jstring trigger_word = readablemap::getString(env, trigger_map, "word", nullptr);
             jboolean trigger_at_start = readablemap::getBool(env, trigger_map, "at_start", false);
-            trigger.word = env->GetStringUTFChars(trigger_word, nullptr);
-            trigger.at_start = trigger_at_start;
-
-            auto ids = common_tokenize(llama->ctx, trigger.word, /* add_special= */ false, /* parse_special= */ true);
+            const char* word = env->GetStringUTFChars(trigger_word, nullptr);
+            
+            trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_WORD;
+            trigger.value = word;  // This assumes value is a std::string
+            
+            // Update the putString call to use value instead of word
+            putString(env, trigger_map, "word", trigger.value.c_str());
+            putBoolean(env, trigger_map, "at_start", trigger_at_start);
+            
+            auto ids = common_tokenize(llama->ctx, word, /* add_special= */ false, /* parse_special= */ true);
             if (ids.size() == 1) {
-                sparams.grammar_trigger_tokens.push_back(ids[0]);
+                // Single token - create a token-type trigger
+                common_grammar_trigger token_trigger;
+                token_trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
+                token_trigger.value = ids[0];  // Set the token ID as the value
+                sparams.grammar_triggers.push_back(token_trigger);
                 sparams.preserved_tokens.insert(ids[0]);
                 continue;
             }
-            sparams.grammar_trigger_words.push_back(trigger);
+            sparams.grammar_triggers.push_back(trigger);
+            
+            // Release the string
+            env->ReleaseStringUTFChars(trigger_word, word);
         }
     }
 

@@ -178,6 +178,7 @@ files_add_lm_prefix=(
   "./cpp/amx/mmq.h"
   "./cpp/amx/mmq.cpp"
   "./cpp/amx/common.h"
+  "./cpp/chat.cpp"
 )
 
 # Loop through each file and run the sed commands
