@@ -1378,11 +1378,32 @@ struct ArgumentsExpression {
     }
 };
 
-static std::string strip(const std::string & s) {
-  auto start = s.find_first_not_of(" \t\n\r");
+static std::string strip(const std::string & s, const std::string & chars = "", bool left = true, bool right = true) {
+  auto charset = chars.empty() ? " \t\n\r" : chars;
+  auto start = left ? s.find_first_not_of(charset) : 0;
   if (start == std::string::npos) return "";
-  auto end = s.find_last_not_of(" \t\n\r");
+  auto end = right ? s.find_last_not_of(charset) : s.size() - 1;
   return s.substr(start, end - start + 1);
+}
+
+static std::vector<std::string> split(const std::string & s, const std::string & sep) {
+  std::vector<std::string> result;
+  size_t start = 0;
+  size_t end = s.find(sep);
+  while (end != std::string::npos) {
+    result.push_back(s.substr(start, end - start));
+    start = end + sep.length();
+    end = s.find(sep, start);
+  }
+  result.push_back(s.substr(start));
+  return result;
+}
+
+static std::string capitalize(const std::string & s) {
+  if (s.empty()) return s;
+  auto result = s;
+  result[0] = std::toupper(result[0]);
+  return result;
 }
 
 static std::string html_escape(const std::string & s) {
@@ -1460,8 +1481,29 @@ public:
         } else if (obj.is_string()) {
           auto str = obj.get<std::string>();
           if (method->get_name() == "strip") {
-            vargs.expectArgs("strip method", {0, 0}, {0, 0});
-            return Value(strip(str));
+            vargs.expectArgs("strip method", {0, 1}, {0, 0});
+            auto chars = vargs.args.empty() ? "" : vargs.args[0].get<std::string>();
+            return Value(strip(str, chars));
+          } else if (method->get_name() == "lstrip") {
+            vargs.expectArgs("lstrip method", {0, 1}, {0, 0});
+            auto chars = vargs.args.empty() ? "" : vargs.args[0].get<std::string>();
+            return Value(strip(str, chars, /* left= */ true, /* right= */ false));
+          } else if (method->get_name() == "rstrip") {
+            vargs.expectArgs("rstrip method", {0, 1}, {0, 0});
+            auto chars = vargs.args.empty() ? "" : vargs.args[0].get<std::string>();
+            return Value(strip(str, chars, /* left= */ false, /* right= */ true));
+          } else if (method->get_name() == "split") {
+            vargs.expectArgs("split method", {1, 1}, {0, 0});
+            auto sep = vargs.args[0].get<std::string>();
+            auto parts = split(str, sep);
+            Value result = Value::array();
+            for (const auto& part : parts) {
+              result.push_back(Value(part));
+            }
+            return result;
+          } else if (method->get_name() == "capitalize") {
+            vargs.expectArgs("capitalize method", {0, 0}, {0, 0});
+            return Value(capitalize(str));
           } else if (method->get_name() == "endswith") {
             vargs.expectArgs("endswith method", {1, 1}, {0, 0});
             auto suffix = vargs.args[0].get<std::string>();
@@ -1792,7 +1834,7 @@ private:
         auto left = parseStringConcat();
         if (!left) throw std::runtime_error("Expected left side of 'logical compare' expression");
 
-        static std::regex compare_tok(R"(==|!=|<=?|>=?|in\b|is\b|not[\r\n\s]+in\b)");
+        static std::regex compare_tok(R"(==|!=|<=?|>=?|in\b|is\b|not\s+in\b)");
         static std::regex not_tok(R"(not\b)");
         std::string op_str;
         while (!(op_str = consumeToken(compare_tok)).empty()) {
@@ -2171,7 +2213,7 @@ private:
     using TemplateTokenIterator = TemplateTokenVector::const_iterator;
 
     std::vector<std::string> parseVarNames() {
-      static std::regex varnames_regex(R"(((?:\w+)(?:[\r\n\s]*,[\r\n\s]*(?:\w+))*)[\r\n\s]*)");
+      static std::regex varnames_regex(R"(((?:\w+)(?:\s*,\s*(?:\w+))*)\s*)");
 
       std::vector<std::string> group;
       if ((group = consumeTokenGroups(varnames_regex)).empty()) throw std::runtime_error("Expected variable names");
@@ -2194,13 +2236,13 @@ private:
     }
 
     TemplateTokenVector tokenize() {
-      static std::regex comment_tok(R"(\{#([-~]?)([\s\S\r\n]*?)([-~]?)#\})");
+      static std::regex comment_tok(R"(\{#([-~]?)([\s\S]*?)([-~]?)#\})");
       static std::regex expr_open_regex(R"(\{\{([-~])?)");
-      static std::regex block_open_regex(R"(^\{%([-~])?[\s\n\r]*)");
+      static std::regex block_open_regex(R"(^\{%([-~])?\s*)");
       static std::regex block_keyword_tok(R"((if|else|elif|endif|for|endfor|generation|endgeneration|set|endset|block|endblock|macro|endmacro|filter|endfilter|break|continue)\b)");
       static std::regex non_text_open_regex(R"(\{\{|\{%|\{#)");
-      static std::regex expr_close_regex(R"([\s\n\r]*([-~])?\}\})");
-      static std::regex block_close_regex(R"([\s\n\r]*([-~])?%\})");
+      static std::regex expr_close_regex(R"(\s*([-~])?\}\})");
+      static std::regex block_close_regex(R"(\s*([-~])?%\})");
 
       TemplateTokenVector tokens;
       std::vector<std::string> group;
@@ -2284,7 +2326,7 @@ private:
               auto post_space = parseBlockClose();
               tokens.push_back(std::make_unique<EndGenerationTemplateToken>(location, pre_space, post_space));
             } else if (keyword == "set") {
-              static std::regex namespaced_var_regex(R"((\w+)[\s\n\r]*\.[\s\n\r]*(\w+))");
+              static std::regex namespaced_var_regex(R"((\w+)\s*\.\s*(\w+))");
 
               std::string ns;
               std::vector<std::string> var_names;
@@ -2336,6 +2378,11 @@ private:
               throw std::runtime_error("Unexpected block: " + keyword);
             }
           } else if (std::regex_search(it, end, match, non_text_open_regex)) {
+            if (!match.position()) {
+                if (match[0] != "{#")
+                    throw std::runtime_error("Internal error: Expected a comment");
+                throw std::runtime_error("Missing end of comment tag");
+            }
             auto text_end = it + match.position();
             text = std::string(it, text_end);
             it = text_end;
@@ -2400,7 +2447,7 @@ private:
 
               auto text = text_token->text;
               if (post_space == SpaceHandling::Strip) {
-                static std::regex trailing_space_regex(R"((\s|\r|\n)+$)");
+                static std::regex trailing_space_regex(R"(\s+$)");
                 text = std::regex_replace(text, trailing_space_regex, "");
               } else if (options.lstrip_blocks && it != end) {
                 auto i = text.size();
@@ -2410,7 +2457,7 @@ private:
                 }
               }
               if (pre_space == SpaceHandling::Strip) {
-                static std::regex leading_space_regex(R"(^(\s|\r|\n)+)");
+                static std::regex leading_space_regex(R"(^\s+)");
                 text = std::regex_replace(text, leading_space_regex, "");
               } else if (options.trim_blocks && (it - 1) != begin && !dynamic_cast<ExpressionTemplateToken*>((*(it - 2)).get())) {
                 if (text.length() > 0 && text[0] == '\n') {

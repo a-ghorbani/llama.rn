@@ -3,8 +3,8 @@
 
 #include <sstream>
 #include <iostream>
-#include "chat.hpp"
-#include "chat-template.hpp"
+#include "chat.h"
+#include "json.hpp"
 #include "common.h"
 #include "ggml.h"
 #include "gguf.h"
@@ -65,7 +65,7 @@ struct llama_rn_context {
 
     llama_context *ctx = nullptr;
     common_sampler *ctx_sampling = nullptr;
-    common_chat_templates templates;
+    common_chat_templates_ptr templates;
 
     int n_ctx;
 

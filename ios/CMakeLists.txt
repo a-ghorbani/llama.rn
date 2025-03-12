@@ -26,6 +26,7 @@ set(PUBLIC_HEADERS
     ${SOURCE_DIR}/llama.h
     ${SOURCE_DIR}/llama-impl.h
     ${SOURCE_DIR}/ggml.h
+    ${SOURCE_DIR}/chat-template.hpp
 )
 
 # Create library target

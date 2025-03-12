@@ -21,6 +21,12 @@ import java.io.IOException;
 public class LlamaContext {
   public static final String NAME = "RNLlamaContext";
 
+  // Grammar trigger type constants. These are defined in common.h (common_grammar_trigger_type)
+  public static final int GRAMMAR_TRIGGER_TYPE_TOKEN = 0;
+  public static final int GRAMMAR_TRIGGER_TYPE_WORD = 1;
+  public static final int GRAMMAR_TRIGGER_TYPE_PATTERN = 2;
+  public static final int GRAMMAR_TRIGGER_TYPE_PATTERN_START = 3;
+
   private static String loadedLibrary = "";
 
   private static class NativeLogCallback {
@@ -39,6 +45,9 @@ public class LlamaContext {
   }
 
   static void toggleNativeLog(ReactApplicationContext reactContext, boolean enabled) {
+    if (LlamaContext.isArchNotSupported()) {
+      throw new IllegalStateException("Only 64-bit architectures are supported");
+    }
     if (enabled) {
       setupLog(new NativeLogCallback(reactContext));
     } else {
@@ -54,7 +63,7 @@ public class LlamaContext {
   private DeviceEventManagerModule.RCTDeviceEventEmitter eventEmitter;
 
   public LlamaContext(int id, ReactApplicationContext reactContext, ReadableMap params) {
-    if (LlamaContext.isArm64V8a() == false && LlamaContext.isX86_64() == false) {
+    if (LlamaContext.isArchNotSupported()) {
       throw new IllegalStateException("Only 64-bit architectures are supported");
     }
     if (!params.hasKey("model")) {
@@ -67,6 +76,8 @@ public class LlamaContext {
       params.getString("model"),
       // String chat_template,
       params.hasKey("chat_template") ? params.getString("chat_template") : "",
+      // String reasoning_format,
+      params.hasKey("reasoning_format") ? params.getString("reasoning_format") : "none",
       // boolean embedding,
       params.hasKey("embedding") ? params.getBoolean("embedding") : false,
       // int embd_normalize,
@@ -298,6 +309,8 @@ public class LlamaContext {
       params.hasKey("dry_allowed_length") ? params.getInt("dry_allowed_length") : 2,
       // int dry_penalty_last_n,
       params.hasKey("dry_penalty_last_n") ? params.getInt("dry_penalty_last_n") : -1,
+      // float top_n_sigma,
+      params.hasKey("top_n_sigma") ? (float) params.getDouble("top_n_sigma") : -1.0f,
       // String[] dry_sequence_breakers, when undef, we use the default definition from common.h
       params.hasKey("dry_sequence_breakers") ? params.getArray("dry_sequence_breakers").toArrayList().toArray(new String[0]) : new String[]{"\n", ":", "\"", "*"},
       // PartialCompletionCallback partial_completion_callback
@@ -418,15 +431,13 @@ public class LlamaContext {
       //  Log.d(NAME, "Loading librnllama_v8_7.so with runtime feature detection");
       //  System.loadLibrary("rnllama_v8_7");
     } else if (LlamaContext.isX86_64()) {
-        Log.d(NAME, "Loading librnllama_x86_64.so");
-        System.loadLibrary("rnllama_x86_64");
-        loadedLibrary = "rnllama_x86_64";
+      Log.d(NAME, "Loading librnllama_x86_64.so");
+      System.loadLibrary("rnllama_x86_64");
+      loadedLibrary = "rnllama_x86_64";
     } else {
-        Log.d(NAME, "Loading default librnllama.so");
-        System.loadLibrary("rnllama");
-        loadedLibrary = "rnllama";
+      Log.d(NAME, "ARM32 is not supported, skipping loading library");
     }
-}
+  }
 
   private static boolean isArm64V8a() {
     return Build.SUPPORTED_ABIS[0].equals("arm64-v8a");
@@ -434,6 +445,10 @@ public class LlamaContext {
 
   private static boolean isX86_64() {
     return Build.SUPPORTED_ABIS[0].equals("x86_64");
+  }
+
+  private static boolean isArchNotSupported() {
+    return isArm64V8a() == false && isX86_64() == false;
   }
 
   private static String getCpuFeatures() {
@@ -463,6 +478,7 @@ public class LlamaContext {
   protected static native long initContext(
     String model,
     String chat_template,
+    String reasoning_format,
     boolean embedding,
     int embd_normalize,
     int n_ctx,
@@ -545,6 +561,7 @@ public class LlamaContext {
     float   dry_base,
     int dry_allowed_length,
     int dry_penalty_last_n,
+    float top_n_sigma,
     String[] dry_sequence_breakers,
     PartialCompletionCallback partial_completion_callback
   );

@@ -13,9 +13,17 @@
 #include "llama-impl.h"
 #include "ggml.h"
 #include "rn-llama.h"
+#include "chat-template.hpp"
 #include "jni-utils.h"
 #define UNUSED(x) (void)(x)
 #define TAG "RNLLAMA_ANDROID_JNI"
+
+typedef minja::chat_template common_chat_template;
+struct common_chat_templates {
+    bool has_explicit_template; // Model had builtin template or template overridde was specified.
+    std::unique_ptr<common_chat_template> template_default; // always set (defaults to chatml)
+    std::unique_ptr<common_chat_template> template_tool_use;
+};
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,     TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,     TAG, __VA_ARGS__)
@@ -223,6 +231,7 @@ Java_com_rnllama_LlamaContext_initContext(
     jobject thiz,
     jstring model_path_str,
     jstring chat_template,
+    jstring reasoning_format,
     jboolean embedding,
     jint embd_normalize,
     jint n_ctx,
@@ -258,6 +267,13 @@ Java_com_rnllama_LlamaContext_initContext(
 
     const char *chat_template_chars = env->GetStringUTFChars(chat_template, nullptr);
     defaultParams.chat_template = chat_template_chars;
+
+    const char *reasoning_format_chars = env->GetStringUTFChars(reasoning_format, nullptr);
+    if (strcmp(reasoning_format_chars, "deepseek") == 0) {
+        defaultParams.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+    } else {
+        defaultParams.reasoning_format = COMMON_REASONING_FORMAT_NONE;
+    }
 
     defaultParams.n_ctx = n_ctx;
     defaultParams.n_batch = n_batch;
@@ -326,6 +342,7 @@ Java_com_rnllama_LlamaContext_initContext(
 
     env->ReleaseStringUTFChars(model_path_str, model_path_chars);
     env->ReleaseStringUTFChars(chat_template, chat_template_chars);
+    env->ReleaseStringUTFChars(reasoning_format, reasoning_format_chars);
     env->ReleaseStringUTFChars(cache_type_k, cache_type_k_chars);
     env->ReleaseStringUTFChars(cache_type_v, cache_type_v_chars);
 
@@ -428,7 +445,7 @@ Java_com_rnllama_LlamaContext_loadModelDetails(
 
     auto default_caps = createWriteableMap(env);
 
-    auto default_tmpl = llama->templates.template_default.get();
+    auto default_tmpl = llama->templates->template_default.get();
     auto default_tmpl_caps = default_tmpl->original_caps();
     putBoolean(env, default_caps, "tools", default_tmpl_caps.supports_tools);
     putBoolean(env, default_caps, "toolCalls", default_tmpl_caps.supports_tool_calls);
@@ -439,7 +456,7 @@ Java_com_rnllama_LlamaContext_loadModelDetails(
     putMap(env, minja, "defaultCaps", default_caps);
 
     putBoolean(env, minja, "toolUse", llama->validateModelChatTemplate(true, "tool_use"));
-    auto tool_use_tmpl = llama->templates.template_tool_use.get();
+    auto tool_use_tmpl = llama->templates->template_tool_use.get();
     if (tool_use_tmpl != nullptr) {
       auto tool_use_caps = createWriteableMap(env);
       auto tool_use_tmpl_caps = tool_use_tmpl->original_caps();
@@ -493,15 +510,15 @@ Java_com_rnllama_LlamaContext_getFormattedChatWithJinja(
             parallel_tool_calls,
             tool_choice_chars
         );
-        putString(env, result, "prompt", formatted.prompt.get<std::string>().c_str());
+        putString(env, result, "prompt", formatted.prompt.c_str());
         putInt(env, result, "chat_format", static_cast<int>(formatted.format));
         putString(env, result, "grammar", formatted.grammar.c_str());
         putBoolean(env, result, "grammar_lazy", formatted.grammar_lazy);
         auto grammar_triggers = createWritableArray(env);
         for (const auto &trigger : formatted.grammar_triggers) {
             auto trigger_map = createWriteableMap(env);
-            putString(env, trigger_map, "word", trigger.word.c_str());
-            putBoolean(env, trigger_map, "at_start", trigger.at_start);
+            putString(env, trigger_map, "word", trigger.value.c_str());
+            //putBoolean(env, trigger_map, "at_start", trigger.at_start);
             pushMap(env, grammar_triggers, trigger_map);
         }
         putArray(env, result, "grammar_triggers", grammar_triggers);
@@ -664,6 +681,7 @@ Java_com_rnllama_LlamaContext_doCompletion(
     jfloat   dry_base,
     jint dry_allowed_length,
     jint dry_penalty_last_n,
+    jfloat top_n_sigma,
     jobjectArray dry_sequence_breakers,
     jobject partial_completion_callback
 ) {
@@ -706,6 +724,7 @@ Java_com_rnllama_LlamaContext_doCompletion(
     sparams.dry_base = dry_base;
     sparams.dry_allowed_length = dry_allowed_length;
     sparams.dry_penalty_last_n = dry_penalty_last_n;
+    sparams.top_n_sigma = top_n_sigma;
 
     // grammar
     auto grammar_chars = env->GetStringUTFChars(grammar, nullptr);
@@ -718,18 +737,32 @@ Java_com_rnllama_LlamaContext_doCompletion(
         for (int i = 0; i < grammar_triggers_size; i++) {
             common_grammar_trigger trigger;
             auto trigger_map = readablearray::getMap(env, grammar_triggers, i);
-            jstring trigger_word = readablemap::getString(env, trigger_map, "word", nullptr);
-            jboolean trigger_at_start = readablemap::getBool(env, trigger_map, "at_start", false);
-            trigger.word = env->GetStringUTFChars(trigger_word, nullptr);
-            trigger.at_start = trigger_at_start;
-
-            auto ids = common_tokenize(llama->ctx, trigger.word, /* add_special= */ false, /* parse_special= */ true);
-            if (ids.size() == 1) {
-                sparams.grammar_trigger_tokens.push_back(ids[0]);
+            
+            // Get type (default to WORD if not specified)
+            jint trigger_type = readablemap::getInt(env, trigger_map, "type", COMMON_GRAMMAR_TRIGGER_TYPE_WORD);
+            
+            // Get value
+            jstring trigger_value = readablemap::getString(env, trigger_map, "value", nullptr);
+            const char* value = env->GetStringUTFChars(trigger_value, nullptr);
+            
+            trigger.type = static_cast<common_grammar_trigger_type>(trigger_type);
+            trigger.value = value;
+            
+            auto ids = common_tokenize(llama->ctx, value, /* add_special= */ false, /* parse_special= */ true);
+            if (ids.size() == 1 && trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_WORD) {
+                // Single token - create a token-type trigger
+                common_grammar_trigger token_trigger;
+                token_trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
+                token_trigger.token = ids[0];  // Set the token ID
+                sparams.grammar_triggers.push_back(token_trigger);
                 sparams.preserved_tokens.insert(ids[0]);
-                continue;
+            } else {
+                // Add the trigger as is
+                sparams.grammar_triggers.push_back(trigger);
             }
-            sparams.grammar_trigger_words.push_back(trigger);
+            
+            // Release the string
+            env->ReleaseStringUTFChars(trigger_value, value);
         }
     }
 
@@ -882,10 +915,16 @@ Java_com_rnllama_LlamaContext_doCompletion(
     llama->is_predicting = false;
 
     auto toolCalls = createWritableArray(env);
+    std::string reasoningContent = "";
+    std::string *content = nullptr;
     auto toolCallsSize = 0;
     if (!llama->is_interrupted) {
         try {
             common_chat_msg message = common_chat_parse(llama->generated_text, static_cast<common_chat_format>(chat_format));
+            if (!message.reasoning_content.empty()) {
+                reasoningContent = message.reasoning_content;
+            }
+            content = &message.content;
             for (const auto &tc : message.tool_calls) {
                 auto toolCall = createWriteableMap(env);
                 putString(env, toolCall, "type", "function");
@@ -906,6 +945,12 @@ Java_com_rnllama_LlamaContext_doCompletion(
 
     auto result = createWriteableMap(env);
     putString(env, result, "text", llama->generated_text.c_str());
+    if (content) {
+        putString(env, result, "content", content->c_str());
+    }
+    if (!reasoningContent.empty()) {
+        putString(env, result, "reasoning_content", reasoningContent.c_str());
+    }
     if (toolCallsSize > 0) {
         putArray(env, result, "tool_calls", toolCalls);
     }

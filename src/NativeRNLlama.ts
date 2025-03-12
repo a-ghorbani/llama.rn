@@ -12,6 +12,8 @@ export type NativeContextParams = {
    */
   chat_template?: string
 
+  reasoning_format?: string
+
   is_model_asset?: boolean
   use_progress_callback?: boolean
 
@@ -71,6 +73,11 @@ export type NativeContextParams = {
   embd_normalize?: number
 }
 
+export type GrammarTrigger = {
+  type?: number; // 0=TOKEN, 1=WORD, 2=PATTERN, 3=PATTERN_START
+  value: string;
+};
+
 export type NativeCompletionParams = {
   prompt: string
   n_threads?: number
@@ -90,10 +97,7 @@ export type NativeCompletionParams = {
   /**
    * Lazy grammar triggers. Default: []
    */
-  grammar_triggers?: Array<{
-    at_start: boolean
-    word: string
-  }>
+  grammar_triggers?: Array<GrammarTrigger>
   preserved_tokens?: Array<string>
   chat_format?: number
   /**
@@ -190,6 +194,11 @@ export type NativeCompletionParams = {
    */
   dry_sequence_breakers?: Array<string>
   /**
+   * Top n sigma sampling as described in academic paper "Top-nσ: Not All Logits Are You Need" https://arxiv.org/pdf/2411.07641. Default: `-1.0` (Disabled)
+   */
+  top_n_sigma?: number
+
+  /**
    * Ignore end of stream token and continue generating. Default: `false`
    */
   ignore_eos?: boolean
@@ -231,7 +240,29 @@ export type NativeCompletionResultTimings = {
 }
 
 export type NativeCompletionResult = {
+  /**
+   * Original text (Ignored reasoning_content / tool_calls)
+   */
   text: string
+  /**
+   * Reasoning content (parsed for reasoning model)
+   */
+  reasoning_content: string
+  /**
+   * Tool calls
+   */
+  tool_calls: Array<{
+    type: 'function'
+    function: {
+      name: string
+      arguments: string
+    }
+    id?: string
+  }>
+  /**
+   * Content text (Filtered text by reasoning_content / tool_calls)
+   */
+  content: string
 
   tokens_predicted: number
   tokens_evaluated: number
@@ -311,10 +342,7 @@ export type JinjaFormattedChatResult = {
   chat_format?: number
   grammar?: string
   grammar_lazy?: boolean
-  grammar_triggers?: Array<{
-    at_start: boolean
-    word: string
-  }>
+  grammar_triggers?: Array<GrammarTrigger>
   preserved_tokens?: Array<string>
   additional_stops?: Array<string>
 }

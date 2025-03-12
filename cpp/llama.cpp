@@ -4978,6 +4978,149 @@ struct llm_build_context {
         return gf;
     }
 
+    struct lm_ggml_cgraph * build_gemma3() {
+        struct lm_ggml_cgraph * gf = lm_ggml_new_graph_custom(ctx0, model.max_nodes(), false);
+
+        const int64_t n_embd_head_k = hparams.n_embd_head_k;
+
+        struct lm_ggml_tensor * cur;
+        struct lm_ggml_tensor * inpL;
+
+        inpL = llm_build_inp_embd(ctx0, lctx, hparams, ubatch, model.tok_embd, cb);
+
+        // important: do not normalize weights for raw embeddings input (i.e. encoded image emdeddings)
+        if (ubatch.token) {
+            inpL = lm_ggml_scale(ctx0, inpL, sqrtf(n_embd));
+            cb(inpL, "inp_scaled", -1);
+        }
+
+        // inp_pos - contains the positions
+        struct lm_ggml_tensor * inp_pos = build_inp_pos();
+
+        // KQ_mask (mask for 1 head, it will be broadcasted to all heads)
+        // gemma3 requires different mask for layers using sliding window (SWA)
+        struct lm_ggml_tensor * KQ_mask     = build_inp_KQ_mask(true);
+        struct lm_ggml_tensor * KQ_mask_swa = build_inp_KQ_mask_swa(true);
+
+        // "5-to-1 interleaved attention"
+        // 5 layers of local attention followed by 1 layer of global attention
+        static const int sliding_window_pattern = 6;
+
+        for (int il = 0; il < n_layer; ++il) {
+            const bool is_sliding          = (il + 1) % sliding_window_pattern;
+            const float freq_base_l        = is_sliding ? 10000.0f    : freq_base;
+            const float freq_scale_l       = is_sliding ? 1.0f        : freq_scale;
+            struct lm_ggml_tensor * KQ_mask_l = is_sliding ? KQ_mask_swa : KQ_mask;
+
+            // norm
+            cur = llm_build_norm(ctx0, inpL, hparams,
+                    model.layers[il].attn_norm, NULL,
+                    LLM_NORM_RMS, cb, il);
+            cb(cur, "attn_norm", il);
+
+            // self-attention
+            {
+                // compute Q and K and RoPE them
+                struct lm_ggml_tensor * Qcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wq, cur);
+                cb(Qcur, "Qcur", il);
+
+                struct lm_ggml_tensor * Kcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wk, cur);
+                cb(Kcur, "Kcur", il);
+
+                struct lm_ggml_tensor * Vcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wv, cur);
+                cb(Vcur, "Vcur", il);
+
+                Qcur = lm_ggml_reshape_3d(ctx0, Qcur, n_embd_head_k, n_head,    n_tokens);
+                Qcur = llm_build_norm(ctx0, Qcur, hparams,
+                    model.layers[il].attn_q_norm,
+                    NULL,
+                    LLM_NORM_RMS, cb, il);
+                cb(Qcur, "Qcur_normed", il);
+
+                Qcur = lm_ggml_rope_ext(
+                        ctx0, Qcur, inp_pos, nullptr,
+                        n_rot, rope_type, n_ctx_orig, freq_base_l, freq_scale_l,
+                        ext_factor, attn_factor, beta_fast, beta_slow);
+                cb(Qcur, "Qcur", il);
+
+                Kcur = lm_ggml_reshape_3d(ctx0, Kcur, n_embd_head_k, n_head_kv, n_tokens);
+                Kcur = llm_build_norm(ctx0, Kcur, hparams,
+                    model.layers[il].attn_k_norm,
+                    NULL,
+                    LLM_NORM_RMS, cb, il);
+                cb(Kcur, "Kcur_normed", il);
+
+                Kcur = lm_ggml_rope_ext(
+                        ctx0, Kcur, inp_pos, nullptr,
+                        n_rot, rope_type, n_ctx_orig, freq_base_l, freq_scale_l,
+                        ext_factor, attn_factor, beta_fast, beta_slow);
+                cb(Kcur, "Kcur", il);
+
+                cur = llm_build_kv(ctx0, lctx, kv_self, gf,
+                        model.layers[il].wo, NULL,
+                        Kcur, Vcur, Qcur, KQ_mask_l, n_tokens, kv_head, n_kv, hparams.f_attention_scale, cb, il);
+            }
+
+            cur = llm_build_norm(ctx0, cur, hparams,
+                    model.layers[il].attn_post_norm, NULL,
+                    LLM_NORM_RMS, cb, il);
+            cb(cur, "attn_post_norm", il);
+
+            if (il == n_layer - 1) {
+                // skip computing output for unused tokens
+                struct lm_ggml_tensor * inp_out_ids = build_inp_out_ids();
+                cur  = lm_ggml_get_rows(ctx0,  cur, inp_out_ids);
+                inpL = lm_ggml_get_rows(ctx0, inpL, inp_out_ids);
+            }
+
+            struct lm_ggml_tensor * sa_out = lm_ggml_add(ctx0, cur, inpL);
+            cb(sa_out, "sa_out", il);
+
+            cur = llm_build_norm(ctx0, sa_out, hparams,
+                    model.layers[il].ffn_norm, NULL,
+                    LLM_NORM_RMS, cb, il);
+            cb(cur, "ffn_norm", il);
+
+            // feed-forward network
+            {
+                cur = llm_build_ffn(ctx0, lctx, cur,
+                        model.layers[il].ffn_up,   NULL, NULL,
+                        model.layers[il].ffn_gate, NULL, NULL,
+                        model.layers[il].ffn_down, NULL, NULL,
+                        NULL,
+                        LLM_FFN_GELU, LLM_FFN_PAR, cb, il);
+                cb(cur, "ffn_out", il);
+            }
+
+            cur = llm_build_norm(ctx0, cur, hparams,
+                model.layers[il].ffn_post_norm, NULL,
+                LLM_NORM_RMS, cb, -1);
+            cb(cur, "ffn_post_norm", -1);
+
+            cur = lm_ggml_add(ctx0, cur, sa_out);
+            cur = lctx.cvec.apply_to(ctx0, cur, il);
+            cb(cur, "l_out", il);
+
+            // input for next layer
+            inpL = cur;
+        }
+
+        cur = inpL;
+
+        cur = llm_build_norm(ctx0, cur, hparams,
+                model.output_norm, NULL,
+                LLM_NORM_RMS, cb, -1);
+        cb(cur, "result_norm", -1);
+
+        // lm_head
+        cur = llm_build_lora_mm(lctx, ctx0, model.output, cur);
+
+        cb(cur, "result_output", -1);
+
+        lm_ggml_build_forward_expand(gf, cur);
+
+        return gf;
+    }
 
     struct lm_ggml_cgraph * build_starcoder2() {
         struct lm_ggml_cgraph * gf = lm_ggml_new_graph_custom(ctx0, model.max_nodes(), false);
@@ -7217,7 +7360,7 @@ struct llm_build_context {
                 struct lm_ggml_tensor * Qcur = nullptr;
                 struct lm_ggml_tensor * Kcur = nullptr;
                 struct lm_ggml_tensor * Vcur = nullptr;
-                if (model.type == LLM_TYPE_1_5B || model.type == LLM_TYPE_4B || model.type == LLM_TYPE_9B) {
+                if (model.layers[il].wqkv == nullptr) {
                     Qcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wq, cur);
                     if (model.layers[il].bq) {
                         Qcur = lm_ggml_add(ctx0, Qcur, model.layers[il].bq);
@@ -8298,6 +8441,10 @@ static struct lm_ggml_cgraph * llama_build_graph(
             {
                 result = llm.build_gemma2();
             } break;
+        case LLM_ARCH_GEMMA3:
+            {
+                result = llm.build_gemma3();
+            } break;
         case LLM_ARCH_STARCODER2:
             {
                 result = llm.build_starcoder2();
@@ -8801,12 +8948,14 @@ static int llama_decode_impl(
     //llama_synchronize(&lctx);
 
     // decide if we need to defrag the kv cache
-    if (cparams.causal_attn && cparams.defrag_thold >= 0.0f) {
-        const float fragmentation = kv_self.n >= 128 ? 1.0f - float(kv_self.used)/float(kv_self.n) : 0.0f;
+    if (cparams.causal_attn && cparams.defrag_thold > 0.0f) {
+        // - do not defrag small contexts (i.e. < 2048 tokens)
+        // - count the padding towards the number of used tokens
+        const float fragmentation = kv_self.n >= 2048 ? std::max(0.0f, 1.0f - float(kv_self.used + llama_kv_cache_get_padding(cparams))/float(kv_self.n)) : 0.0f;
 
         // queue defragmentation for next llama_kv_cache_update
         if (fragmentation > cparams.defrag_thold) {
-            //LLAMA_LOG_INFO("fragmentation: %.2f\n", fragmentation);
+            LLAMA_LOG_DEBUG("%s: fragmentation: %.2f - requesting defrag\n", __func__, fragmentation);
 
             llama_kv_cache_defrag(kv_self);
         }
@@ -9428,8 +9577,6 @@ static struct llama_model * llama_model_load_from_file_impl(
         struct llama_model_params params) {
     lm_ggml_time_init();
 
-    llama_model * model = new llama_model(params);
-
     unsigned cur_percentage = 0;
     if (params.progress_callback == NULL) {
         params.progress_callback_user_data = &cur_percentage;
@@ -9446,6 +9593,8 @@ static struct llama_model * llama_model_load_from_file_impl(
             return true;
         };
     }
+
+    llama_model * model = new llama_model(params);
 
     // create list of devices to use with this model
     if (params.devices) {
