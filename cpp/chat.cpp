@@ -373,7 +373,7 @@ common_chat_templates_ptr common_chat_templates_init(
 
     bool has_explicit_template = !chat_template_override.empty();
     if (chat_template_override.empty()) {
-        GGML_ASSERT(model != nullptr);
+        LM_GGML_ASSERT(model != nullptr);
         const auto * str = llama_model_chat_template(model, /* name */ nullptr);
         if (str) {
             default_template_src = str;
@@ -1499,7 +1499,7 @@ static common_chat_msg common_chat_parse_hermes_2_pro(const std::string& input) 
                     if (function_name.empty()) {
                         function_name = match[5].str();
                     }
-                    GGML_ASSERT(!function_name.empty());
+                    LM_GGML_ASSERT(!function_name.empty());
 
                     close_tag = "</function>";
                     // Start parsing from after the opening tags
@@ -1715,7 +1715,7 @@ common_chat_params common_chat_templates_apply(
     const struct common_chat_templates * tmpls,
     const struct common_chat_templates_inputs & inputs)
 {
-    GGML_ASSERT(tmpls != nullptr);
+    LM_GGML_ASSERT(tmpls != nullptr);
     return inputs.use_jinja
         ? common_chat_templates_apply_jinja(tmpls, inputs)
         : common_chat_templates_apply_legacy(tmpls, inputs);
