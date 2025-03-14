@@ -1,4 +1,8 @@
-# llama.rn
+# @pocketpalai/llama.rn
+
+> **Important**: If you are here for llama.rn, please visit the [original repository](https://github.com/mybigday/llama.rn).
+
+This package is a fork of [llama.rn](https://github.com/mybigday/llama.rn) by [Jhen-Jie Hong](https://github.com/mybigday). We strive to maintain parity with the original repository, only introducing minimal changes when necessary (such as bug fixes or specific integrations required for [PocketPal AI](https://github.com/a-ghorbani/pocketpal-ai)).
 
 [![Actions Status](https://github.com/mybigday/llama.rn/workflows/CI/badge.svg)](https://github.com/mybigday/llama.rn/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
