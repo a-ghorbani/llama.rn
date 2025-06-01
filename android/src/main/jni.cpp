@@ -659,12 +659,25 @@ static inline jobject tokenProbsToMap(
     return result;
 }
 
+static inline jobject tokensToArray(
+    JNIEnv *env,
+    rnllama::llama_rn_context *llama,
+    std::vector<llama_token> tokens
+) {
+    auto result = createWritableArray(env);
+    for (const auto &token : tokens) {
+        pushInt(env, result, token);
+    }
+    return result;
+}
+
 JNIEXPORT jobject JNICALL
 Java_com_rnllama_LlamaContext_doCompletion(
     JNIEnv *env,
     jobject thiz,
     jlong context_ptr,
     jstring prompt,
+    jintArray guide_tokens,
     jint chat_format,
     jstring grammar,
     jstring json_schema,
@@ -698,7 +711,7 @@ Java_com_rnllama_LlamaContext_doCompletion(
     jint dry_penalty_last_n,
     jfloat top_n_sigma,
     jobjectArray dry_sequence_breakers,
-    jobjectArray image_paths,
+    jobjectArray media_paths,
     jobject partial_completion_callback
 ) {
     UNUSED(thiz);
@@ -713,11 +726,23 @@ Java_com_rnllama_LlamaContext_doCompletion(
     // Set the prompt parameter
     llama->params.prompt = prompt_chars;
 
-    // Process image paths if provided
-    std::vector<std::string> image_paths_vector;
+    // Set the guide tokens parameter
+    if (guide_tokens != nullptr) {
+        int guide_tokens_size = env->GetArrayLength(guide_tokens);
+        int *guide_tokens_array = env->GetIntArrayElements(guide_tokens, nullptr);
+        std::vector<llama_token> guide_tokens_vector(guide_tokens_size);
+        for (int i = 0; i < guide_tokens_size; i++) {
+            guide_tokens_vector[i] = guide_tokens_array[i];
+        }
+        env->ReleaseIntArrayElements(guide_tokens, guide_tokens_array, 0);
+        llama->setGuideTokens(guide_tokens_vector);
+    }
 
-    jint image_paths_size = env->GetArrayLength(image_paths);
-    if (image_paths_size > 0) {
+    // Process image paths if provided
+    std::vector<std::string> media_paths_vector;
+
+    jint media_paths_size = env->GetArrayLength(media_paths);
+    if (media_paths_size > 0) {
         // Check if multimodal is enabled
         if (!llama->isMultimodalEnabled()) {
             auto result = createWriteableMap(env);
@@ -726,10 +751,10 @@ Java_com_rnllama_LlamaContext_doCompletion(
             return reinterpret_cast<jobject>(result);
         }
 
-        for (jint i = 0; i < image_paths_size; i++) {
-            jstring image_path = (jstring) env->GetObjectArrayElement(image_paths, i);
+        for (jint i = 0; i < media_paths_size; i++) {
+            jstring image_path = (jstring) env->GetObjectArrayElement(media_paths, i);
             const char *image_path_chars = env->GetStringUTFChars(image_path, nullptr);
-            image_paths_vector.push_back(image_path_chars);
+            media_paths_vector.push_back(image_path_chars);
             env->ReleaseStringUTFChars(image_path, image_path_chars);
         }
     }
@@ -890,10 +915,19 @@ Java_com_rnllama_LlamaContext_doCompletion(
         putString(env, result, "error", "Failed to initialize sampling");
         return reinterpret_cast<jobject>(result);
     }
+
     llama->beginCompletion();
-    llama->loadPrompt(image_paths_vector);
+    try {
+        llama->loadPrompt(media_paths_vector);
+    } catch (const std::exception &e) {
+        llama->endCompletion();
+        auto result = createWriteableMap(env);
+        putString(env, result, "error", e.what());
+        return reinterpret_cast<jobject>(result);
+    }
 
     if (llama->context_full) {
+        llama->endCompletion();
         auto result = createWriteableMap(env);
         putString(env, result, "error", "Context is full");
         return reinterpret_cast<jobject>(result);
@@ -967,7 +1001,7 @@ Java_com_rnllama_LlamaContext_doCompletion(
     }
 
     llama_perf_context_print(llama->ctx);
-    llama->is_predicting = false;
+    llama->endCompletion();
 
     auto toolCalls = createWritableArray(env);
     std::string reasoningContent = "";
@@ -1009,6 +1043,7 @@ Java_com_rnllama_LlamaContext_doCompletion(
     if (toolCallsSize > 0) {
         putArray(env, result, "tool_calls", toolCalls);
     }
+    putArray(env, result, "audio_tokens", tokensToArray(env, llama, llama->audio_tokens));
     putArray(env, result, "completion_probabilities", tokenProbsToMap(env, llama, llama->generated_token_probs));
     putInt(env, result, "tokens_predicted", llama->num_tokens_predicted);
     putInt(env, result, "tokens_evaluated", llama->num_prompt_tokens);
@@ -1057,22 +1092,47 @@ Java_com_rnllama_LlamaContext_isPredicting(
 
 JNIEXPORT jobject JNICALL
 Java_com_rnllama_LlamaContext_tokenize(
-        JNIEnv *env, jobject thiz, jlong context_ptr, jstring text) {
+        JNIEnv *env, jobject thiz, jlong context_ptr, jstring text, jobjectArray media_paths) {
     UNUSED(thiz);
     auto llama = context_map[(long) context_ptr];
 
     const char *text_chars = env->GetStringUTFChars(text, nullptr);
-
-    const std::vector<llama_token> toks = common_tokenize(
-        llama->ctx,
-        text_chars,
-        false
-    );
-
-    jobject result = createWritableArray(env);
-    for (const auto &tok : toks) {
-      pushInt(env, result, tok);
+    std::vector<std::string> media_paths_vector;
+    for (int i = 0; i < env->GetArrayLength(media_paths); i++) {
+        jstring image_path = (jstring) env->GetObjectArrayElement(media_paths, i);
+        const char *image_path_chars = env->GetStringUTFChars(image_path, nullptr);
+        media_paths_vector.push_back(image_path_chars);
+        env->ReleaseStringUTFChars(image_path, image_path_chars);
     }
+    auto tokenize_result = llama->tokenize(text_chars, media_paths_vector);
+
+    auto result = createWriteableMap(env);
+
+    auto tokens = createWritableArray(env);
+    for (const auto &tok : tokenize_result.tokens) {
+      pushInt(env, tokens, tok);
+    }
+    putArray(env, result, "tokens", tokens);
+
+    putBoolean(env, result, "has_media", tokenize_result.has_media);
+
+    auto bitmap_hashes = createWritableArray(env);
+    for (const auto &hash : tokenize_result.bitmap_hashes) {
+      pushString(env, bitmap_hashes, hash.c_str());
+    }
+    putArray(env, result, "bitmap_hashes", bitmap_hashes);
+
+    auto chunk_pos = createWritableArray(env);
+    for (const auto &pos : tokenize_result.chunk_pos) {
+      pushInt(env, chunk_pos, pos);
+    }
+    putArray(env, result, "chunk_pos", chunk_pos);
+
+    auto chunk_pos_media = createWritableArray(env);
+    for (const auto &pos : tokenize_result.chunk_pos_media) {
+      pushInt(env, chunk_pos_media, pos);
+    }
+    putArray(env, result, "chunk_pos_media", chunk_pos_media);
 
     env->ReleaseStringUTFChars(text, text_chars);
     return result;
@@ -1141,7 +1201,12 @@ Java_com_rnllama_LlamaContext_embedding(
     }
 
     llama->beginCompletion();
-    llama->loadPrompt({});
+    try {
+        llama->loadPrompt({});
+    } catch (const std::exception &e) {
+        putString(env, result, "error", e.what());
+        return reinterpret_cast<jobject>(result);
+    }
     llama->doCompletion();
 
     std::vector<float> embedding = llama->getEmbedding(embdParams);
@@ -1340,6 +1405,21 @@ Java_com_rnllama_LlamaContext_isMultimodalEnabled(
     return llama->isMultimodalEnabled();
 }
 
+JNIEXPORT jobject JNICALL
+Java_com_rnllama_LlamaContext_getMultimodalSupport(
+    JNIEnv *env,
+    jobject thiz,
+    jlong context_ptr
+) {
+    UNUSED(env);
+    UNUSED(thiz);
+    auto llama = context_map[(long) context_ptr];
+    auto result = createWriteableMap(env);
+    putBoolean(env, result, "vision", llama->isMultimodalSupportVision());
+    putBoolean(env, result, "audio", llama->isMultimodalSupportAudio());
+    return result;
+}
+
 JNIEXPORT void JNICALL
 Java_com_rnllama_LlamaContext_releaseMultimodal(
     JNIEnv *env,
@@ -1350,6 +1430,110 @@ Java_com_rnllama_LlamaContext_releaseMultimodal(
     UNUSED(thiz);
     auto llama = context_map[(long) context_ptr];
     llama->releaseMultimodal();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_rnllama_LlamaContext_initVocoder(
+    JNIEnv *env,
+    jobject thiz,
+    jlong context_ptr,
+    jstring vocoder_model_path
+) {
+    UNUSED(env);
+    UNUSED(thiz);
+    auto llama = context_map[(long) context_ptr];
+    const char *vocoder_model_path_chars = env->GetStringUTFChars(vocoder_model_path, nullptr);
+    bool result = llama->initVocoder(vocoder_model_path_chars);
+    env->ReleaseStringUTFChars(vocoder_model_path, vocoder_model_path_chars);
+    return result;
+}
+
+JNIEXPORT void JNICALL
+Java_com_rnllama_LlamaContext_releaseVocoder(
+    JNIEnv *env,
+    jobject thiz,
+    jlong context_ptr
+) {
+    UNUSED(env);
+    UNUSED(thiz);
+    auto llama = context_map[(long) context_ptr];
+    llama->releaseVocoder();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_rnllama_LlamaContext_isVocoderEnabled(
+    JNIEnv *env,
+    jobject thiz,
+    jlong context_ptr
+) {
+    UNUSED(env);
+    UNUSED(thiz);
+    auto llama = context_map[(long) context_ptr];
+    return llama->isVocoderEnabled();
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_rnllama_LlamaContext_getFormattedAudioCompletion(
+    JNIEnv *env,
+    jobject thiz,
+    jlong context_ptr,
+    jstring speaker_json_str,
+    jstring text_to_speak
+) {
+    UNUSED(env);
+    UNUSED(thiz);
+    auto llama = context_map[(long) context_ptr];
+    const char *speaker_json_str_chars = env->GetStringUTFChars(speaker_json_str, nullptr);
+    const char *text_to_speak_chars = env->GetStringUTFChars(text_to_speak, nullptr);
+    std::string result = llama->getFormattedAudioCompletion(speaker_json_str_chars, text_to_speak_chars);
+    env->ReleaseStringUTFChars(speaker_json_str, speaker_json_str_chars);
+    env->ReleaseStringUTFChars(text_to_speak, text_to_speak_chars);
+    return env->NewStringUTF(result.c_str());
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_rnllama_LlamaContext_getAudioCompletionGuideTokens(
+    JNIEnv *env,
+    jobject thiz,
+    jlong context_ptr,
+    jstring text_to_speak
+) {
+    UNUSED(env);
+    UNUSED(thiz);
+    auto llama = context_map[(long) context_ptr];
+    const char *text_to_speak_chars = env->GetStringUTFChars(text_to_speak, nullptr);
+    std::vector<llama_token> guide_tokens = llama->getAudioCompletionGuideTokens(text_to_speak_chars);
+    env->ReleaseStringUTFChars(text_to_speak, text_to_speak_chars);
+    auto result = createWritableArray(env);
+    for (const auto &val : guide_tokens) {
+        pushInt(env, result, (int) val);
+    }
+    return result;
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_rnllama_LlamaContext_decodeAudioTokens(
+    JNIEnv *env,
+    jobject thiz,
+    jlong context_ptr,
+    jintArray tokens
+) {
+    UNUSED(env);
+    UNUSED(thiz);
+    auto llama = context_map[(long) context_ptr];
+    jsize tokens_size = env->GetArrayLength(tokens);
+    jint *tokens_ptr = env->GetIntArrayElements(tokens, nullptr);
+    std::vector<llama_token> tokens_vec(tokens_size);
+    for (int i = 0; i < tokens_size; i++) {
+        tokens_vec[i] = tokens_ptr[i];
+    }
+    env->ReleaseIntArrayElements(tokens, tokens_ptr, 0);
+    std::vector<float> audio = llama->decodeAudioTokens(tokens_vec);
+    auto result = createWritableArray(env);
+    for (const auto &val : audio) {
+      pushDouble(env, result, (double) val);
+    }
+    return result;
 }
 
 } // extern "C"

@@ -24,6 +24,7 @@
 - [embedding](LlamaContext.md#embedding)
 - [getFormattedChat](LlamaContext.md#getformattedchat)
 - [getLoadedLoraAdapters](LlamaContext.md#getloadedloraadapters)
+- [getMultimodalSupport](LlamaContext.md#getmultimodalsupport)
 - [initMultimodal](LlamaContext.md#initmultimodal)
 - [isJinjaSupported](LlamaContext.md#isjinjasupported)
 - [isLlamaChatSupported](LlamaContext.md#isllamachatsupported)
@@ -50,7 +51,7 @@
 
 #### Defined in
 
-[index.ts:173](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L173)
+[index.ts:190](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L190)
 
 ## Properties
 
@@ -60,7 +61,7 @@
 
 #### Defined in
 
-[index.ts:167](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L167)
+[index.ts:184](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L184)
 
 ___
 
@@ -70,7 +71,7 @@ ___
 
 #### Defined in
 
-[index.ts:165](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L165)
+[index.ts:182](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L182)
 
 ___
 
@@ -110,7 +111,7 @@ ___
 
 #### Defined in
 
-[index.ts:171](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L171)
+[index.ts:188](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L188)
 
 ___
 
@@ -120,7 +121,7 @@ ___
 
 #### Defined in
 
-[index.ts:169](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L169)
+[index.ts:186](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L186)
 
 ## Methods
 
@@ -140,7 +141,7 @@ ___
 
 #### Defined in
 
-[index.ts:416](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L416)
+[index.ts:461](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L461)
 
 ___
 
@@ -163,7 +164,7 @@ ___
 
 #### Defined in
 
-[index.ts:396](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L396)
+[index.ts:441](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L441)
 
 ___
 
@@ -186,13 +187,13 @@ Generate a completion based on the provided parameters
 
 Promise resolving to the completion result
 
-Note: For multimodal support, you can include an image_paths parameter.
+Note: For multimodal support, you can include an media_paths parameter.
 This will process the images and add them to the context before generating text.
 Multimodal support must be enabled via initMultimodal() first.
 
 #### Defined in
 
-[index.ts:290](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L290)
+[index.ts:323](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L323)
 
 ___
 
@@ -212,7 +213,7 @@ ___
 
 #### Defined in
 
-[index.ts:385](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L385)
+[index.ts:430](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L430)
 
 ___
 
@@ -233,13 +234,13 @@ ___
 
 #### Defined in
 
-[index.ts:389](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L389)
+[index.ts:434](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L434)
 
 ___
 
 ### getFormattedChat
 
-▸ **getFormattedChat**(`messages`, `template?`, `params?`): `Promise`<[`FormattedChatResult`](../README.md#formattedchatresult)\>
+▸ **getFormattedChat**(`messages`, `template?`, `params?`): `Promise`<[`FormattedChatResult`](../README.md#formattedchatresult) \| [`JinjaFormattedChatResult`](../README.md#jinjaformattedchatresult)\>
 
 #### Parameters
 
@@ -256,11 +257,11 @@ ___
 
 #### Returns
 
-`Promise`<[`FormattedChatResult`](../README.md#formattedchatresult)\>
+`Promise`<[`FormattedChatResult`](../README.md#formattedchatresult) \| [`JinjaFormattedChatResult`](../README.md#jinjaformattedchatresult)\>
 
 #### Defined in
 
-[index.ts:208](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L208)
+[index.ts:225](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L225)
 
 ___
 
@@ -274,7 +275,25 @@ ___
 
 #### Defined in
 
-[index.ts:432](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L432)
+[index.ts:477](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L477)
+
+___
+
+### getMultimodalSupport
+
+▸ **getMultimodalSupport**(): `Promise`<{ `audio`: `boolean` ; `vision`: `boolean`  }\>
+
+Check multimodal support
+
+#### Returns
+
+`Promise`<{ `audio`: `boolean` ; `vision`: `boolean`  }\>
+
+Promise resolving to an object with vision and audio support
+
+#### Defined in
+
+[index.ts:516](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L516)
 
 ___
 
@@ -300,7 +319,7 @@ Promise resolving to true if initialization was successful
 
 #### Defined in
 
-[index.ts:445](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L445)
+[index.ts:490](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L490)
 
 ___
 
@@ -314,7 +333,7 @@ ___
 
 #### Defined in
 
-[index.ts:203](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L203)
+[index.ts:220](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L220)
 
 ___
 
@@ -328,7 +347,7 @@ ___
 
 #### Defined in
 
-[index.ts:199](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L199)
+[index.ts:216](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L216)
 
 ___
 
@@ -346,7 +365,7 @@ Promise resolving to true if multimodal is enabled
 
 #### Defined in
 
-[index.ts:459](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L459)
+[index.ts:508](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L508)
 
 ___
 
@@ -368,7 +387,7 @@ Load cached prompt & completion state from a file.
 
 #### Defined in
 
-[index.ts:183](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L183)
+[index.ts:200](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L200)
 
 ___
 
@@ -382,7 +401,7 @@ ___
 
 #### Defined in
 
-[index.ts:471](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L471)
+[index.ts:531](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L531)
 
 ___
 
@@ -400,7 +419,7 @@ Promise resolving to void
 
 #### Defined in
 
-[index.ts:467](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L467)
+[index.ts:527](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L527)
 
 ___
 
@@ -414,7 +433,7 @@ ___
 
 #### Defined in
 
-[index.ts:428](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L428)
+[index.ts:473](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L473)
 
 ___
 
@@ -438,7 +457,7 @@ Save current cached prompt & completion state to a file.
 
 #### Defined in
 
-[index.ts:192](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L192)
+[index.ts:209](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L209)
 
 ___
 
@@ -452,24 +471,30 @@ ___
 
 #### Defined in
 
-[index.ts:377](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L377)
+[index.ts:409](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L409)
 
 ___
 
 ### tokenize
 
-▸ **tokenize**(`text`): `Promise`<[`NativeTokenizeResult`](../README.md#nativetokenizeresult)\>
+▸ **tokenize**(`text`, `«destructured»?`): `Promise`<[`NativeTokenizeResult`](../README.md#nativetokenizeresult)\>
+
+Tokenize text or text with images
 
 #### Parameters
 
-| Name | Type |
-| :------ | :------ |
-| `text` | `string` |
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `text` | `string` | Text to tokenize |
+| `«destructured»` | `Object` | - |
+| › `media_paths?` | `string`[] | - |
 
 #### Returns
 
 `Promise`<[`NativeTokenizeResult`](../README.md#nativetokenizeresult)\>
 
+Promise resolving to the tokenize result
+
 #### Defined in
 
-[index.ts:381](https://github.com/mybigday/llama.rn/blob/67ab8f4/src/index.ts#L381)
+[index.ts:419](https://github.com/mybigday/llama.rn/blob/1571b49/src/index.ts#L419)

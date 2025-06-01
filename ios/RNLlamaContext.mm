@@ -338,11 +338,21 @@
     return llama->initMultimodal([mmproj_path UTF8String], use_gpu);
 }
 
+- (NSDictionary *)getMultimodalSupport {
+    if (!is_model_loaded) return nil;
+    return @{
+        @"vision": @(llama->isMultimodalSupportVision()),
+        @"audio": @(llama->isMultimodalSupportAudio())
+    };
+}
+
 - (bool)isMultimodalEnabled {
+    if (!is_model_loaded) return false;
     return llama->isMultimodalEnabled();
 }
 
 - (void)releaseMultimodal {
+    if (!is_model_loaded) return;
     llama->releaseMultimodal();
 }
 
@@ -571,27 +581,43 @@
         }
     }
 
+    if (params[@"guide_tokens"] && [params[@"guide_tokens"] isKindOfClass:[NSArray class]]) {
+        NSArray *guide_tokens_array = params[@"guide_tokens"];
+        std::vector<llama_token> guide_tokens;
+        guide_tokens.reserve([guide_tokens_array count]);
+        for (NSNumber *token_num in guide_tokens_array) {
+            guide_tokens.push_back([token_num intValue]);
+        }
+        llama->setGuideTokens(guide_tokens);
+    }
+
     if (!llama->initSampling()) {
         @throw [NSException exceptionWithName:@"LlamaException" reason:@"Failed to initialize sampling" userInfo:nil];
     }
-    llama->beginCompletion();
 
-    // Use the unified loadPrompt function with image paths if available
-    NSArray *imagePaths = params[@"image_paths"];
-    if (imagePaths && [imagePaths count] > 0) {
-        // Multiple image paths
-        std::vector<std::string> image_paths_vector;
-        for (NSString *path in imagePaths) {
-            if ([path isKindOfClass:[NSString class]]) {
-                image_paths_vector.push_back([path UTF8String]);
+    llama->beginCompletion();
+    try {
+        // Use the unified loadPrompt function with image paths if available
+        NSArray *imagePaths = params[@"media_paths"];
+        if (imagePaths && [imagePaths count] > 0) {
+            // Multiple image paths
+            std::vector<std::string> media_paths_vector;
+            for (NSString *path in imagePaths) {
+                if ([path isKindOfClass:[NSString class]]) {
+                    media_paths_vector.push_back([path UTF8String]);
+                }
             }
+            llama->loadPrompt(media_paths_vector);
+        } else {
+            llama->loadPrompt({});
         }
-        llama->loadPrompt(image_paths_vector);
-    } else {
-        llama->loadPrompt({});
+    } catch (const std::exception &e) {
+        llama->endCompletion();
+        @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
     }
 
     if (llama->context_full) {
+        llama->endCompletion();
         @throw [NSException exceptionWithName:@"LlamaException" reason:@"Context is full" userInfo:nil];
     }
 
@@ -654,7 +680,7 @@
     }
 
     llama_perf_context_print(llama->ctx);
-    llama->is_predicting = false;
+    llama->endCompletion();
 
     const auto timings = llama_perf_context(llama->ctx);
 
@@ -700,6 +726,15 @@
     result[@"stopped_limit"] = @(llama->stopped_limit);
     result[@"stopping_word"] = [NSString stringWithUTF8String:llama->stopping_word.c_str()];
     result[@"tokens_cached"] = @(llama->n_past);
+    
+    if (llama->isVocoderEnabled() && !llama->audio_tokens.empty()) {
+        NSMutableArray *audioTokens = [[NSMutableArray alloc] init];
+        for (llama_token token : llama->audio_tokens) {
+            [audioTokens addObject:@(token)];
+        }
+        result[@"audio_tokens"] = audioTokens;
+    }
+    
     result[@"timings"] = @{
         @"prompt_n": @(timings.n_p_eval),
         @"prompt_ms": @(timings.t_p_eval_ms),
@@ -718,13 +753,48 @@
     llama->is_interrupted = true;
 }
 
-- (NSArray *)tokenize:(NSString *)text {
-    const std::vector<llama_token> toks = common_tokenize(llama->ctx, [text UTF8String], false);
-    NSMutableArray *result = [[NSMutableArray alloc] init];
-    for (llama_token tok : toks) {
-        [result addObject:@(tok)];
+- (NSDictionary *)tokenize:(NSString *)text imagePaths:(NSArray *)imagePaths {
+    std::vector<std::string> media_paths_vector;
+    if (imagePaths && [imagePaths count] > 0) {
+        for (NSString *path in imagePaths) {
+            if ([path isKindOfClass:[NSString class]]) {
+                media_paths_vector.push_back([path UTF8String]);
+            }
+        }
     }
-    return result;
+    try {
+        rnllama::llama_rn_tokenize_result tokenize_result = llama->tokenize([text UTF8String], media_paths_vector);
+
+        NSMutableDictionary *result = [[NSMutableDictionary alloc] init];
+
+        result[@"tokens"] = [NSMutableArray arrayWithCapacity:tokenize_result.tokens.size()];
+        for (llama_token tok : tokenize_result.tokens) {
+            [result[@"tokens"] addObject:@(tok)];
+        }
+        result[@"has_media"] = @(tokenize_result.has_media);
+
+        NSMutableArray *bitmap_hashes = [[NSMutableArray alloc] init];
+        for (std::string hash : tokenize_result.bitmap_hashes) {
+            [bitmap_hashes addObject:[NSString stringWithUTF8String:hash.c_str()]];
+        }
+        result[@"bitmap_hashes"] = bitmap_hashes;
+
+        NSMutableArray *chunk_pos = [[NSMutableArray alloc] init];
+        for (int pos : tokenize_result.chunk_pos) {
+            [chunk_pos addObject:@(pos)];
+        }
+        result[@"chunk_pos"] = chunk_pos;
+
+        NSMutableArray *chunk_pos_media = [[NSMutableArray alloc] init];
+        for (int pos : tokenize_result.chunk_pos_media) {
+            [chunk_pos_media addObject:@(pos)];
+        }
+        result[@"chunk_pos_media"] = chunk_pos_media;
+
+        return result;
+    } catch (const std::exception &e) {
+        @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
+    }
 }
 
 - (NSString *)detokenize:(NSArray *)tokens {
@@ -761,7 +831,12 @@
         @throw [NSException exceptionWithName:@"LlamaException" reason:@"Failed to initialize sampling" userInfo:nil];
     }
     llama->beginCompletion();
-    llama->loadPrompt({});
+    try {
+      llama->loadPrompt({});
+    } catch (const std::exception &e) {
+      llama->endCompletion();
+      @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
+    }
     llama->doCompletion();
 
     std::vector<float> result = llama->getEmbedding(embdParams);
@@ -778,7 +853,7 @@
     }
     resultDict[@"prompt_tokens"] = promptTokens;
 
-    llama->is_predicting = false;
+    llama->endCompletion();
     return resultDict;
 }
 
@@ -862,6 +937,45 @@
         }];
     }
     return result;
+}
+
+- (bool)initVocoder:(NSString *)vocoderModelPath {
+    return llama->initVocoder([vocoderModelPath UTF8String]);
+}
+
+- (bool)isVocoderEnabled {
+    return llama->isVocoderEnabled();
+}
+
+- (NSString *)getFormattedAudioCompletion:(NSString *)speakerJsonStr textToSpeak:(NSString *)textToSpeak {
+    std::string speakerStr = speakerJsonStr ? [speakerJsonStr UTF8String] : "";
+    return [NSString stringWithUTF8String:llama->getFormattedAudioCompletion(speakerStr, [textToSpeak UTF8String]).c_str()];
+}
+
+- (NSArray *)getAudioCompletionGuideTokens:(NSString *)textToSpeak {
+    std::vector<llama_token> guide_tokens = llama->getAudioCompletionGuideTokens([textToSpeak UTF8String]);
+    NSMutableArray *result = [[NSMutableArray alloc] init];
+    for (llama_token token : guide_tokens) {
+        [result addObject:@(token)];
+    }
+    return result;
+}
+
+- (NSArray *)decodeAudioTokens:(NSArray *)tokens {
+    std::vector<llama_token> token_vector;
+    for (NSNumber *token in tokens) {
+        token_vector.push_back([token intValue]);
+    }
+    std::vector<float> audio_data = llama->decodeAudioTokens(token_vector);
+    NSMutableArray *result = [[NSMutableArray alloc] init];
+    for (float sample : audio_data) {
+        [result addObject:@(sample)];
+    }
+    return result;
+}
+
+- (void)releaseVocoder {
+    llama->releaseVocoder();
 }
 
 - (void)invalidate {

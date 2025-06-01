@@ -1,4 +1,5 @@
 #include "rn-llama.h"
+#include "rn-tts.h"
 
 // Include multimodal support
 #include "tools/mtmd/mtmd.h"
@@ -248,6 +249,7 @@ void llama_rn_context::rewind() {
     generated_text = "";
     generated_text.reserve(params.n_ctx);
     generated_token_probs.clear();
+    audio_tokens.clear();
     truncated = false;
     context_full = false;
     stopped_eos = false;
@@ -258,6 +260,8 @@ void llama_rn_context::rewind() {
     n_remain = 0;
     n_past = 0;
     params.sampling.n_prev = n_ctx;
+    next_token_uses_guide_token = true;
+    guide_tokens.clear();
 }
 
 bool llama_rn_context::initSampling() {
@@ -371,16 +375,11 @@ void llama_rn_context::truncatePrompt(std::vector<llama_token> &prompt_tokens) {
     prompt_tokens = new_tokens;
 }
 
-void llama_rn_context::loadPrompt(const std::vector<std::string> &image_paths) {
-    bool has_images = !image_paths.empty() && isMultimodalEnabled();
+void llama_rn_context::loadPrompt(const std::vector<std::string> &media_paths) {
+    bool has_media = !media_paths.empty();
 
-    LOG_INFO("[DEBUG] loadPrompt: has_images=%d, prompt='%s', image_paths_count=%zu",
-             has_images ? 1 : 0, params.prompt.c_str(), image_paths.size());
-
-    // Step 1: Process input (different for text-only vs. multimodal)
-    std::vector<llama_token> text_tokens;
-
-    if (!has_images) {
+    if (!has_media) {
+        std::vector<llama_token> text_tokens;
         // Text-only path
         text_tokens = ::common_tokenize(ctx, params.prompt, true, true);
         num_prompt_tokens = text_tokens.size();
@@ -432,18 +431,19 @@ void llama_rn_context::loadPrompt(const std::vector<std::string> &image_paths) {
             tokens_to_str(ctx, embd.cbegin() + n_past, embd.cend()).c_str()
         );
     } else {
-        // Multimodal path - process all images
-        if (!processImage(image_paths, params.prompt, text_tokens)) {
-            LOG_ERROR("[DEBUG] Failed to process images", "");
-            return;
-        }
-        num_prompt_tokens = text_tokens.size();
+        // Multimodal path - process all media paths
+        processMedia(params.prompt, media_paths);
+        num_prompt_tokens = embd.size();
     }
 
     has_next_token = true;
 
-    LOG_INFO("[DEBUG] Input processed: n_past=%d, embd.size=%zu, num_prompt_tokens=%zu, has_images=%d",
-             n_past, embd.size(), num_prompt_tokens, has_images ? 1 : 0);
+    LOG_INFO("[DEBUG] Input processed: n_past=%d, embd.size=%zu, num_prompt_tokens=%zu, has_media=%d",
+             n_past, embd.size(), num_prompt_tokens, has_media ? 1 : 0);
+}
+
+void llama_rn_context::setGuideTokens(const std::vector<llama_token> &tokens) {
+    guide_tokens = tokens;
 }
 
 void llama_rn_context::beginCompletion() {
@@ -451,6 +451,10 @@ void llama_rn_context::beginCompletion() {
     n_remain = params.n_predict;
     llama_perf_context_reset(ctx);
     is_predicting = true;
+}
+
+void llama_rn_context::endCompletion() {
+    is_predicting = false;
 }
 
 completion_token_output llama_rn_context::nextToken()
@@ -532,7 +536,14 @@ completion_token_output llama_rn_context::nextToken()
         std::vector<llama_token_data> candidates;
         candidates.reserve(llama_vocab_n_tokens(vocab));
 
-        result.tok = common_sampler_sample(ctx_sampling, ctx, -1);
+        llama_token new_token_id = common_sampler_sample(ctx_sampling, ctx, -1);
+
+        if (next_token_uses_guide_token && !guide_tokens.empty() && !llama_vocab_is_control(vocab, new_token_id) && !llama_vocab_is_eog(vocab, new_token_id)) {
+            new_token_id = guide_tokens[0];
+            guide_tokens.erase(guide_tokens.begin());
+        }
+        next_token_uses_guide_token = (new_token_id == 198);
+        result.tok = new_token_id;
 
         llama_token_data_array cur_p = *common_sampler_get_candidates(ctx_sampling);
 
@@ -614,6 +625,13 @@ completion_token_output llama_rn_context::doCompletion()
 
     const std::string token_text = token_with_probs.tok == -1 ? "" : common_token_to_piece(ctx, token_with_probs.tok);
     generated_text += token_text;
+
+    if (isVocoderEnabled()) {
+        tts_type type = getTTSType();
+        if ((type == OUTETTS_V0_2 || type == OUTETTS_V0_3) && (token_with_probs.tok >= 151672 && token_with_probs.tok <= 155772)) {
+            audio_tokens.push_back(token_with_probs.tok);
+        }
+    }
 
     if (params.sampling.n_probs > 0)
     {
@@ -785,7 +803,7 @@ std::string llama_rn_context::bench(int pp, int tg, int pl, int nr)
     }
 
     if (is_interrupted) llama_kv_self_clear(ctx);
-    is_predicting = false;
+    endCompletion();
 
     char model_desc[128];
     llama_model_desc(model, model_desc, sizeof(model_desc));
@@ -860,8 +878,8 @@ bool llama_rn_context::initMultimodal(const std::string &mmproj_path, bool use_g
              uses_non_causal ? 1 : 0);
 
     // Disable context shifting when multimodal is enabled
-    // This is because an image chunk may contain multiple tokens
-    // and context shifting could break the image representation
+    // This is because an media chunk may contain multiple tokens
+    // and context shifting could break the media representation
     params.ctx_shift = false;
 
     // params.n_cache_reuse = 0;
@@ -871,101 +889,72 @@ bool llama_rn_context::initMultimodal(const std::string &mmproj_path, bool use_g
     return true;
 }
 
-bool llama_rn_context::processImage(
-    const std::vector<std::string> &image_paths,
-    const std::string &prompt,
-    std::vector<llama_token> &text_tokens
-) {
-    if (!isMultimodalEnabled()) {
-        LOG_ERROR("[DEBUG] Multimodal context not initialized", "");
-        return false;
-    }
+struct mtmd_tokenize_result {
+    std::vector<std::string> bitmap_hashes;
+    std::vector<llama_token> tokens;
+    std::vector<size_t> chunk_pos; // both text and media
+    std::vector<size_t> chunk_pos_media; // media only
+    mtmd_input_chunks* chunks = nullptr;
+};
 
-    // Multimodal path
-    std::string full_prompt = prompt;
-    // Add image marker if it doesn't already exist
-    if (full_prompt.find("<__image__>") == std::string::npos) {
-        full_prompt += " <__image__>";
-    }
-
-    LOG_INFO("[DEBUG] Processing message with role=user, content=%s", full_prompt.c_str());
-    LOG_INFO("[DEBUG] Processing %zu images with prompt: %s", image_paths.size(), prompt.c_str());
-    LOG_INFO("[DEBUG] Current context state: n_past=%d, n_ctx=%d", n_past, n_ctx);
-
-    // Prepare bitmaps array for all images
+mtmd_tokenize_result tokenizeWithMedia(llama_rn_context_mtmd *mtmd_wrapper, const std::string &prompt, const std::vector<std::string> &media_paths) {
+    mtmd_tokenize_result result;
     mtmd::bitmaps bitmaps;
 
-    std::vector<std::string> bitmap_hashes;
+    // Load all media paths
+    for (const auto& media_path : media_paths) {
+        LOG_INFO("[DEBUG] Loading media: %s",
+                 media_path.substr(0, 50).c_str()); // Only log part of path for base64
 
-    // Load all images
-    for (const auto& image_path : image_paths) {
-        LOG_INFO("[DEBUG] Loading image: %s",
-                 image_path.substr(0, 50).c_str()); // Only log part of path for base64
-
-        // Check if it's a base64 image
-        if (image_path.compare(0, 11, "data:image/") == 0) {
-            LOG_INFO("[DEBUG] Detected base64 encoded image");
+        // Check if it's a base64 media
+        if (media_path.compare(0, 11, "data:image/") == 0 || media_path.compare(0, 11, "data:audio/") == 0) {
+            LOG_INFO("[DEBUG] Detected base64 encoded media");
 
             // Parse base64 data
             std::vector<std::string> parts;
-            size_t comma_pos = image_path.find(',');
+            size_t comma_pos = media_path.find(',');
             if (comma_pos == std::string::npos) {
-                LOG_ERROR("[DEBUG] Invalid base64 image format, missing comma separator");
-                bitmaps.entries.clear();
-                return false;
+                throw std::runtime_error("Invalid base64 media format, missing comma separator");
             }
 
-            std::string header = image_path.substr(0, comma_pos);
-            std::string base64_data = image_path.substr(comma_pos + 1);
+            std::string header = media_path.substr(0, comma_pos);
+            std::string base64_data = media_path.substr(comma_pos + 1);
 
             if (header.find("base64") == std::string::npos) {
-                LOG_ERROR("[DEBUG] Image must be base64 encoded");
                 bitmaps.entries.clear();
-                return false;
+                throw std::runtime_error("Image must be base64 encoded");
             }
 
             // Decode base64
-            try {
-                // Decode base64 to binary
-                std::vector<uint8_t> image_data = base64_decode(base64_data);
-                LOG_INFO("[DEBUG] Base64 decoded, size: %zu bytes", image_data.size());
+            std::vector<uint8_t> media_data = base64_decode(base64_data);
+            LOG_INFO("[DEBUG] Base64 decoded, size: %zu bytes", media_data.size());
 
-                // Load bitmap from memory buffer using direct initialization
-                mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(image_data.data(), image_data.size()));
-                if (!bmp.ptr) {
-                    LOG_ERROR("[DEBUG] Failed to load base64 image");
-                    bitmaps.entries.clear();
-                    return false;
-                }
-
-                // Calculate bitmap hash (for KV caching)
-                std::string hash = fnv_hash(bmp.data(), bmp.nx()*bmp.ny()*3);
-                bmp.set_id(hash.c_str());
-                LOG_INFO("[DEBUG] Bitmap hash: %s", hash.c_str());
-                bitmaps.entries.push_back(std::move(bmp));
-                bitmap_hashes.push_back(hash.c_str());
-            } catch (const std::exception& e) {
-                LOG_ERROR("[DEBUG] Failed to decode base64 image: %s", e.what());
+            // Load bitmap from memory buffer using direct initialization
+            mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(media_data.data(), media_data.size()));
+            if (!bmp.ptr) {
                 bitmaps.entries.clear();
-                return false;
+                throw std::runtime_error("Failed to load base64 media");
             }
-        } else if (image_path.compare(0, 7, "http://") == 0 || image_path.compare(0, 8, "https://") == 0) {
+
+            // Calculate bitmap hash (for KV caching)
+            std::string hash = fnv_hash(bmp.data(), bmp.n_bytes());
+            bmp.set_id(hash.c_str());
+            LOG_INFO("[DEBUG] Bitmap hash: %s", hash.c_str());
+            bitmaps.entries.push_back(std::move(bmp));
+            result.bitmap_hashes.push_back(hash.c_str());
+        } else if (media_path.compare(0, 7, "http://") == 0 || media_path.compare(0, 8, "https://") == 0) {
             // HTTP URLs are not supported yet
-            LOG_ERROR("[DEBUG] HTTP/HTTPS URLs are not supported yet: %s", image_path.c_str());
-            bitmaps.entries.clear();
-            return false;
+            LOG_ERROR("[DEBUG] HTTP/HTTPS URLs are not supported yet: %s", media_path.c_str());
+            throw std::runtime_error("HTTP/HTTPS URLs are not supported yet");
         } else {
             // Regular file path
-            LOG_INFO("[DEBUG] Loading image from file");
+            LOG_INFO("[DEBUG] Loading media from file");
 
             // Check if file exists
-            FILE* file = fopen(image_path.c_str(), "rb");
+            FILE* file = fopen(media_path.c_str(), "rb");
             if (file == nullptr) {
-                LOG_ERROR("[DEBUG] File does not exist or cannot be opened: %s (errno: %d, %s)",
-                         image_path.c_str(), errno, strerror(errno));
-
                 bitmaps.entries.clear();
-                return false;
+                throw std::runtime_error("File does not exist or cannot be opened");
             }
 
             // Get file size
@@ -976,11 +965,10 @@ bool llama_rn_context::processImage(
             fclose(file);
 
             // Create bitmap directly
-            mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_file(image_path.c_str()));
+            mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_file(media_path.c_str()));
             if (!bmp.ptr) {
-                LOG_ERROR("[DEBUG] Failed to load image");
                 bitmaps.entries.clear();
-                return false;
+                throw std::runtime_error("Failed to load media");
             }
 
             // Calculate bitmap hash (for KV caching)
@@ -988,35 +976,31 @@ bool llama_rn_context::processImage(
             bmp.set_id(hash.c_str());
             LOG_INFO("[DEBUG] Bitmap hash: %s", hash.c_str());
             bitmaps.entries.push_back(std::move(bmp));
-            bitmap_hashes.push_back(hash.c_str());
+            result.bitmap_hashes.push_back(hash.c_str());
         }
     }
 
     // Create input chunks
     LOG_INFO("[DEBUG] Initializing input chunks");
-    mtmd_input_chunks* chunks = mtmd_input_chunks_init();
-    if (chunks == nullptr) {
-        LOG_ERROR("[DEBUG] Failed to initialize input chunks", "");
+    result.chunks = mtmd_input_chunks_init();
+    if (result.chunks == nullptr) {
         bitmaps.entries.clear();
-        return false;
+        throw std::runtime_error("Failed to initialize input chunks");
     }
 
-    // Create input text
-    LOG_INFO("[DEBUG] Setting up input text with add_special=%d, parse_special=%d",
-             n_past == 0 ? 1 : 0, 1);
     mtmd_input_text input_text;
-    input_text.text = full_prompt.c_str(); // Use the full prompt with image marker
-    input_text.add_special = n_past == 0;  // Add BOS token if this is the first message
-    input_text.parse_special = true;       // Parse special tokens like <__image__>
+    input_text.text = prompt.c_str(); // Use the full prompt with image marker
+    input_text.add_special = true;  // Add BOS token if this is the first message
+    input_text.parse_special = true;       // Parse special tokens like <__media__>
 
     /**
-     * Tokenize the text and images together.
+     * Tokenize the text and media together.
      *
-     * Example of tokenization for "foo bar <__image__> baz <__image__>":
+     * Example of tokenization for "foo bar <__media__> baz <__media__>":
      *
-     * 1. Input text with image markers:
+     * 1. Input text with media markers:
      *
-     *    "foo bar <__image__> baz <__image__>"
+     *    "foo bar <__media__> baz <__media__>"
      *
      * 2. Model-specific markers are added.
      *
@@ -1036,7 +1020,7 @@ bool llama_rn_context::processImage(
      *
      *    For Qwen2VL (uses M-RoPE with 2D positions):
      *    ┌─────────────────────────────────────────┐
-     *    │ IMAGE_CHUNK                             │
+     *    │ MEDIA_CHUNK                             │
      *    │ ┌───────────────────────────────────┐   │
      *    │ │ mtmd_image_tokens:                │   │
      *    │ │  nx = 16, ny = 16                 │   │ ← 2D grid (16×16 = 256 tokens)
@@ -1047,7 +1031,7 @@ bool llama_rn_context::processImage(
      *
      *    For other models (uses 1D positions):
      *    ┌─────────────────────────────────────────┐
-     *    │ IMAGE_CHUNK                             │
+     *    │ MEDIA_CHUNK                             │
      *    │ ┌───────────────────────────────────┐   │
      *    │ │ mtmd_image_tokens:                │   │
      *    │ │  nx = 256, ny = 1                 │   │ ← 1D sequence (256 tokens)
@@ -1058,29 +1042,22 @@ bool llama_rn_context::processImage(
      *
      * 5. Final chunks array:
      *    chunks[0] = TEXT_CHUNK([1234, 5678])
-     *    chunks[1] = IMAGE_CHUNK(first_image)
+     *    chunks[1] = MEDIA_CHUNK(first_image)
      *    chunks[2] = TEXT_CHUNK([9012])
-     *    chunks[3] = IMAGE_CHUNK(second_image)
+     *    chunks[3] = MEDIA_CHUNK(second_image)
      */
-    LOG_INFO("[DEBUG] Tokenizing text and %zu images", bitmaps.entries.size());
+    LOG_INFO("[DEBUG] Tokenizing text and %zu media", bitmaps.entries.size());
     auto bitmaps_c_ptr = bitmaps.c_ptr();
-    int32_t res = mtmd_tokenize(mtmd_wrapper->mtmd_ctx, chunks, &input_text, bitmaps_c_ptr.data(), bitmaps_c_ptr.size());
+    int32_t res = mtmd_tokenize(mtmd_wrapper->mtmd_ctx, result.chunks, &input_text, bitmaps_c_ptr.data(), bitmaps_c_ptr.size());
     if (res != 0) {
-        LOG_ERROR("[DEBUG] Failed to tokenize images and text: %d", res);
-        mtmd_input_chunks_free(chunks);
+        mtmd_input_chunks_free(result.chunks);
         bitmaps.entries.clear();
-        return false;
+        throw std::runtime_error("Failed to tokenize text and media");
     }
 
     // Log chunk information
-    size_t num_chunks = mtmd_input_chunks_size(chunks);
+    size_t num_chunks = mtmd_input_chunks_size(result.chunks);
     LOG_INFO("[DEBUG] Tokenization successful: num_chunks=%zu", num_chunks);
-
-    // Clear text_tokens before adding new tokens
-    text_tokens.clear();
-
-    // Create a vector to store all tokens (both text and image)
-    std::vector<llama_token> all_tokens;
 
     // Track the total number of tokens (both text and image)
     size_t total_token_count = 0;
@@ -1088,7 +1065,7 @@ bool llama_rn_context::processImage(
     /**
      * Evaluate the chunks.
      *
-     * For our example "foo bar <__image__> baz <__image__>":
+     * For our example "foo bar <__media__> baz <__media__>":
      *
      * Token organization in memory:
      *
@@ -1102,12 +1079,10 @@ bool llama_rn_context::processImage(
      *    - [t2] is the text token for " baz " (position 258)
      *    - [NULL]x256 are placeholder tokens for the second image (positions 259-514)
      */
-    std::vector<size_t> chunk_pos;
-    std::vector<size_t> chunk_pos_images;
     for (size_t i = 0; i < num_chunks; i++) {
-        chunk_pos.push_back(total_token_count);
+        result.chunk_pos.push_back(total_token_count);
 
-        const mtmd_input_chunk* chunk = mtmd_input_chunks_get(chunks, i);
+        const mtmd_input_chunk* chunk = mtmd_input_chunks_get(result.chunks, i);
         mtmd_input_chunk_type chunk_type = mtmd_input_chunk_get_type(chunk);
 
         if (chunk_type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
@@ -1116,43 +1091,95 @@ bool llama_rn_context::processImage(
             LOG_INFO("[DEBUG] Chunk %zu: type=TEXT, n_tokens=%zu", i, n_tokens);
 
             // Add text tokens
-            text_tokens.insert(text_tokens.end(), tokens, tokens + n_tokens);
-            all_tokens.insert(all_tokens.end(), tokens, tokens + n_tokens);
+            result.tokens.insert(result.tokens.end(), tokens, tokens + n_tokens);
             total_token_count += n_tokens;
-        } else if (chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
-            chunk_pos_images.push_back(total_token_count);
+        } else if (chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE || chunk_type == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
+            result.chunk_pos_media.push_back(total_token_count);
 
-            const mtmd_image_tokens* img_tokens = mtmd_input_chunk_get_tokens_image(chunk);
-            size_t n_tokens = mtmd_image_tokens_get_n_tokens(img_tokens);
-            size_t n_pos = mtmd_image_tokens_get_n_pos(img_tokens);
-            LOG_INFO("[DEBUG] Chunk %zu: type=IMAGE, n_tokens=%zu, n_pos=%zu",
-                     i, n_tokens, n_pos);
+            size_t n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
+            size_t n_pos = mtmd_input_chunk_get_n_pos(chunk);
+            LOG_INFO("[DEBUG] Chunk %zu: type=%s, n_tokens=%zu, n_pos=%zu",
+                     i, chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE ? "IMAGE" : "AUDIO", n_tokens, n_pos);
 
             for (size_t j = 0; j < n_pos; j++) {
-                all_tokens.push_back(LLAMA_TOKEN_NULL); // Placeholder token
+                result.tokens.push_back(LLAMA_TOKEN_NULL); // Placeholder token
             }
             total_token_count += n_pos;
         }
     }
 
+    bitmaps.entries.clear();
+
+    return result;
+}
+void llama_rn_context::processMedia(
+    const std::string &prompt,
+    const std::vector<std::string> &media_paths
+) {
+    if (!isMultimodalEnabled()) {
+        throw std::runtime_error("Multimodal is not enabled but image paths are provided");
+    }
+
+    // Multimodal path
+    std::string full_prompt = prompt;
+    auto default_media_marker = mtmd_default_marker();
+    // Add media marker if it doesn't already exist
+    if (full_prompt.find(default_media_marker) == std::string::npos) {
+        full_prompt += " ";
+        full_prompt += default_media_marker;
+    }
+
+    LOG_INFO("[DEBUG] Processing message with role=user, content=%s", full_prompt.c_str());
+    LOG_INFO("[DEBUG] Processing %zu media with prompt: %s", media_paths.size(), prompt.c_str());
+    LOG_INFO("[DEBUG] Current context state: n_past=%d, n_ctx=%d", n_past, n_ctx);
+
+    auto result = tokenizeWithMedia(mtmd_wrapper, full_prompt, media_paths);
+
+    auto all_tokens = result.tokens;
+    auto chunks = result.chunks;
+    auto chunk_pos = result.chunk_pos;
+    auto chunk_pos_media = result.chunk_pos_media;
+    auto bitmap_hashes = result.bitmap_hashes;
+
     // Check if we have enough context space for all tokens
-    if (n_past + all_tokens.size() >= (size_t)n_ctx) {
-        LOG_ERROR("[DEBUG] Not enough context space: n_past=%d, tokens=%zu, n_ctx=%d",
-                 n_past, all_tokens.size(), n_ctx);
+    if (all_tokens.size() >= (size_t)n_ctx) {
         mtmd_input_chunks_free(chunks);
-        bitmaps.entries.clear();
         context_full = true;
-        return false;
+        throw std::runtime_error("Not enough context space");
     }
 
     n_past = common_part(embd, all_tokens);
 
     llama_pos new_n_past = n_past;
 
+    // Adjust n_past to position of the text chunk
+    // TODO: Edit the text chunk to remove the tokens before n_past to speed up
+    // need to update the mtmd api
+    auto adjusted_n_past = -1;
+    for (size_t i = 0; i < chunk_pos.size(); i++) {
+        if (n_past < chunk_pos[i]) {
+            break;
+        }
+        bool is_end = i + 1 == chunk_pos.size();
+        if (
+            chunk_pos[i] < n_past &&
+            (!is_end && chunk_pos[i + 1] > n_past)
+            // is_end & n_past < total_token_count:
+            // don't need to adjust and it will skip eval_chunk_single, let nextToken() to finish the job
+        ) {
+            adjusted_n_past = chunk_pos[i];
+        }
+    }
+    if (adjusted_n_past != -1) {
+        n_past = adjusted_n_past;
+        new_n_past = n_past;
+        LOG_INFO("[DEBUG] Adjusted n_past to %d", n_past);
+    }
+
     // Compare bitmap hashes, if they are not the same, backtrack n_past to the position of the first mismatch
     if (mtmd_bitmap_past_hashes.size() > 0) {
         for (size_t i = 0; i < bitmap_hashes.size(); i++) {
-            auto pos = chunk_pos_images[i];
+            auto pos = chunk_pos_media[i];
             if (n_past < pos) {
                 break;
             }
@@ -1164,7 +1191,7 @@ bool llama_rn_context::processImage(
                     "[DEBUG] Bitmap hash mismatch at position %zu, %s != %s",
                     i, bitmap_hashes[i].c_str(), mtmd_bitmap_past_hashes[i].c_str()
                 );
-                n_past = chunk_pos_images[i];
+                n_past = chunk_pos_media[i];
                 new_n_past = n_past;
                 break;
             }
@@ -1175,6 +1202,8 @@ bool llama_rn_context::processImage(
     llama_kv_self_seq_rm(ctx, 0, n_past, -1);
 
     LOG_INFO("[DEBUG] Evaluating chunks: n_past=%d, n_batch=%d", n_past, params.n_batch);
+
+    size_t num_chunks = mtmd_input_chunks_size(chunks);
 
     for (size_t i = 0; i < chunk_pos.size(); i++) {
 
@@ -1192,25 +1221,23 @@ bool llama_rn_context::processImage(
                 n_past,
                 0,
                 params.n_batch,
-                true,
+                chunk_logits_last,
                 &new_n_past
             );
             if (res != 0) {
-                LOG_ERROR("[DEBUG] Failed to evaluate chunks", "");
                 mtmd_input_chunks_free(chunks);
-                bitmaps.entries.clear();
-                return res;
+                throw std::runtime_error("Failed to evaluate chunks");
             }
             n_past = new_n_past;
         }
     }
 
-    if (n_past == total_token_count && n_past > 0 && all_tokens[n_past - 1] != LLAMA_TOKEN_NULL) {
+    if (n_past == all_tokens.size() && n_past > 0 && all_tokens[n_past - 1] != LLAMA_TOKEN_NULL) {
         // we have to evaluate at least 1 token to generate logits.
         n_past--;
     }
 
-    // Update embd with all tokens (both text and image)
+    // Update embd with all tokens (both text and media)
     embd = all_tokens;
 
     mtmd_bitmap_past_hashes = bitmap_hashes;
@@ -1223,15 +1250,49 @@ bool llama_rn_context::processImage(
         common_sampler_accept(ctx_sampling, token, false);
     }
 
-    // Clean up image resources
+    // Clean up media resources
     LOG_INFO("[DEBUG] Cleaning up resources");
     mtmd_input_chunks_free(chunks);
-    bitmaps.entries.clear();
-    return true;
+}
+
+llama_rn_tokenize_result llama_rn_context::tokenize(const std::string &text, const std::vector<std::string> &media_paths) {
+    if (media_paths.size() > 0) {
+        if (!isMultimodalEnabled()) {
+            throw std::runtime_error("Multimodal is not enabled but media paths are provided");
+        }
+        auto result = tokenizeWithMedia(mtmd_wrapper, text, media_paths);
+        mtmd_input_chunks_free(result.chunks);
+        llama_rn_tokenize_result tokenize_result = {
+            .tokens = result.tokens,
+            .has_media = true,
+            .bitmap_hashes = result.bitmap_hashes,
+            .chunk_pos = result.chunk_pos,
+            .chunk_pos_media = result.chunk_pos_media,
+        };
+        return tokenize_result;
+    }
+    std::vector<llama_token> text_tokens;
+    text_tokens = common_tokenize(ctx, text, false);
+    llama_rn_tokenize_result tokenize_result = {
+        .tokens = text_tokens,
+        .has_media = false,
+        .bitmap_hashes = {},
+        .chunk_pos = {},
+        .chunk_pos_media = {},
+    };
+    return tokenize_result;
 }
 
 bool llama_rn_context::isMultimodalEnabled() const {
     return has_multimodal && mtmd_wrapper != nullptr;
+}
+
+bool llama_rn_context::isMultimodalSupportVision() const {
+    return isMultimodalEnabled() && mtmd_support_vision(mtmd_wrapper->mtmd_ctx);
+}
+
+bool llama_rn_context::isMultimodalSupportAudio() const {
+    return isMultimodalEnabled() && mtmd_support_audio(mtmd_wrapper->mtmd_ctx);
 }
 
 void llama_rn_context::releaseMultimodal() {
@@ -1242,6 +1303,500 @@ void llama_rn_context::releaseMultimodal() {
         mtmd_wrapper = nullptr;
         has_multimodal = false;
     }
+}
+
+struct llama_rn_context_vocoder {
+    common_init_result init_result;
+    llama_model *model = nullptr;
+    llama_context *ctx = nullptr;
+    tts_type type = UNKNOWN;
+};
+
+bool llama_rn_context::initVocoder(const std::string &vocoder_model_path) {
+    if (vocoder_wrapper != nullptr) {
+        return true;
+    }
+    params.model.path = vocoder_model_path;
+    params.embedding = true;
+    params.ctx_shift = false;
+    params.n_ubatch = params.n_batch;
+
+    llama_rn_context_vocoder *wrapper = new llama_rn_context_vocoder{
+        .init_result = common_init_from_params(params),
+    };
+
+    wrapper->model = wrapper->init_result.model.get();
+    wrapper->ctx = wrapper->init_result.context.get();
+
+    if (wrapper->model == nullptr || wrapper->ctx == nullptr) {
+        LOG_ERROR("Failed to load vocoder model: %s", vocoder_model_path.c_str());
+        delete wrapper;
+        return false;
+    }
+
+    wrapper->type = getTTSType();
+    vocoder_wrapper = wrapper;
+    has_vocoder = true;
+    return true;
+}
+
+bool llama_rn_context::isVocoderEnabled() const {
+    return has_vocoder && vocoder_wrapper != nullptr;
+}
+
+void llama_rn_context::releaseVocoder() {
+    if (vocoder_wrapper != nullptr) {
+        delete vocoder_wrapper;
+        vocoder_wrapper = nullptr;
+    }
+    has_vocoder = false;
+}
+
+tts_type llama_rn_context::getTTSType(json speaker) {
+    if (vocoder_wrapper == nullptr) {
+        return UNKNOWN;
+    }
+    if (speaker.is_object() && speaker.contains("version")) {
+        std::string version = speaker["version"].get<std::string>();
+        if (version == "0.2") {
+            return OUTETTS_V0_2;
+        } else if (version == "0.3") {
+            return OUTETTS_V0_3;
+        } else {
+            LOG_ERROR("Unsupported speaker version '%s'\n", version.c_str());
+        }
+    }
+    if (vocoder_wrapper->type != UNKNOWN) {
+        return vocoder_wrapper->type;
+    }
+    const char *chat_template = llama_model_chat_template(model, nullptr);
+    if (chat_template && std::string(chat_template) == "outetts-0.3") {
+        return OUTETTS_V0_3;
+    }
+    return OUTETTS_V0_2;
+}
+
+static std::string audio_text_from_speaker(json speaker, const tts_type type = OUTETTS_V0_2) {
+    std::string audio_text = "<|text_start|>";
+
+    if (type == OUTETTS_V0_2 || type == OUTETTS_V0_3) {
+        std::string separator = (type == OUTETTS_V0_3) ? "<|space|>" : "<|text_sep|>";
+        for (const auto &word : speaker["words"]) {
+            audio_text += word["word"].get<std::string>() + separator;
+        }
+    }
+
+    return audio_text;
+}
+
+static std::string audio_data_from_speaker(json speaker, const tts_type type = OUTETTS_V0_2) {
+    std::string audio_data = "<|audio_start|>\n";
+
+    if (type == OUTETTS_V0_2 || type == OUTETTS_V0_3) {
+        std::string code_start = (type == OUTETTS_V0_3) ? "" : "<|code_start|>";
+        std::string code_end = (type == OUTETTS_V0_3) ? "<|space|>" : "<|code_end|>";
+        for (const auto &word : speaker["words"]) {
+            std::string word_text = word["word"].get<std::string>();
+            double duration = word["duration"].get<double>();
+            std::vector<int> codes = word["codes"].get<std::vector<int>>();
+
+            // Create the audio output entry
+            std::ostringstream word_entry;
+            word_entry << word_text << "<|t_" << std::fixed << std::setprecision(2)
+                       << duration << "|>" + code_start;
+            for (const auto &Code : codes) {
+                word_entry << "<|" << Code << "|>";
+            }
+            word_entry << code_end << "\n";
+            audio_data += word_entry.str();
+        }
+    }
+
+    return audio_data;
+}
+
+static const std::map<int, std::string> ones = {
+    {0, "zero"}, {1, "one"}, {2, "two"}, {3, "three"}, {4, "four"},
+    {5, "five"}, {6, "six"}, {7, "seven"}, {8, "eight"}, {9, "nine"},
+    {10, "ten"}, {11, "eleven"}, {12, "twelve"}, {13, "thirteen"}, {14, "fourteen"},
+    {15, "fifteen"}, {16, "sixteen"}, {17, "seventeen"}, {18, "eighteen"}, {19, "nineteen"}
+};
+
+static const std::map<int, std::string> tens = {
+    {2, "twenty"}, {3, "thirty"}, {4, "forty"}, {5, "fifty"},
+    {6, "sixty"}, {7, "seventy"}, {8, "eighty"}, {9, "ninety"}
+};
+
+// Convert a number less than 1000 to words
+static std::string convert_less_than_thousand(int num) {
+    std::string result;
+
+    if (num >= 100) {
+        result += ones.at(num / 100) + " hundred ";
+        num %= 100;
+    }
+
+    if (num >= 20) {
+        result += tens.at(num / 10);
+        if (num % 10 > 0) {
+            result += "-" + ones.at(num % 10);
+        }
+    } else if (num > 0) {
+        result += ones.at(num);
+    }
+
+    return result;
+}
+
+static std::string number_to_words(const std::string & number_str) {
+    try {
+        size_t decimal_pos = number_str.find('.');
+        std::string integer_part = number_str.substr(0, decimal_pos);
+
+        int int_number = std::stoi(integer_part);
+        std::string result;
+
+        if (int_number == 0) {
+            result = "zero";
+        } else {
+            if (int_number >= 1000000000) {
+                int billions = int_number / 1000000000;
+                result += convert_less_than_thousand(billions) + " billion ";
+                int_number %= 1000000000;
+            }
+
+            if (int_number >= 1000000) {
+                int millions = int_number / 1000000;
+                result += convert_less_than_thousand(millions) + " million ";
+                int_number %= 1000000;
+            }
+
+            if (int_number >= 1000) {
+                int thousands = int_number / 1000;
+                result += convert_less_than_thousand(thousands) + " thousand ";
+                int_number %= 1000;
+            }
+
+            if (int_number > 0) {
+                result += convert_less_than_thousand(int_number);
+            }
+        }
+
+        // Handle decimal part
+        if (decimal_pos != std::string::npos) {
+            result += " point";
+            std::string decimal_part = number_str.substr(decimal_pos + 1);
+            for (char digit : decimal_part) {
+                result += " " + ones.at(digit - '0');
+            }
+        }
+
+        return result;
+    } catch (const std::exception& e) {
+        // Skip if fails
+        return " ";
+    }
+}
+
+static std::string replace_numbers_with_words(const std::string & input_text) {
+    std::regex number_pattern(R"(\d+(\.\d+)?)");
+    std::string result;
+    auto it = std::sregex_iterator(input_text.begin(), input_text.end(), number_pattern);
+    auto end = std::sregex_iterator();
+
+    size_t last_pos = 0;
+    for (std::sregex_iterator i = it; i != end; ++i) {
+        const std::smatch& match = *i;
+        result.append(input_text, last_pos, match.position() - last_pos);
+        result.append(number_to_words(match.str()));
+        last_pos = match.position() + match.length();
+    }
+    result.append(input_text, last_pos);
+
+    return result;
+}
+
+// Based on: https://github.com/edwko/OuteTTS/blob/a613e79c489d8256dd657ea9168d78de75895d82/outetts/version/v1/prompt_processor.py#L39
+static std::string process_text(const std::string & text, const tts_type tts_type = OUTETTS_V0_2) {
+
+    // For now I skipped text romanization as I am unsure how to handle
+    // uroman and MeCab implementations in C++
+    // maybe something like https://github.com/anyascii/anyascii/ could work.
+    // currently only English would be supported in this function
+
+    std::string processed_text = replace_numbers_with_words(text);
+
+    std::transform(processed_text.begin(), processed_text.end(),
+                  processed_text.begin(), ::tolower);
+
+    std::regex special_chars(R"([-_/,\.\\])");
+    processed_text = std::regex_replace(processed_text, special_chars, " ");
+
+    std::regex non_alpha(R"([^a-z\s])");
+    processed_text = std::regex_replace(processed_text, non_alpha, "");
+
+    std::regex multiple_spaces(R"(\s+)");
+    processed_text = std::regex_replace(processed_text, multiple_spaces, " ");
+
+    processed_text = std::regex_replace(processed_text, std::regex(R"(^\s+|\s+$)"), "");
+
+    /*
+        Replace spaces with the separator token same as in line 365
+
+        for (auto & c : prompt_user) {
+        if (c == ' ') {
+            prompt_clean += "<|text_sep|>";
+    */
+    std::string separator = (tts_type == OUTETTS_V0_3) ? "<|space|>" : "<|text_sep|>";
+    processed_text = std::regex_replace(processed_text, std::regex(R"(\s)"), separator);
+
+    return processed_text;
+}
+
+std::string llama_rn_context::getFormattedAudioCompletion(const std::string &speaker_json_str, const std::string &text_to_speak) {
+    if (!isVocoderEnabled()) {
+        throw std::runtime_error("Vocoder is not enabled but audio completion is requested");
+    }
+    std::string audio_text = default_audio_text;
+    std::string audio_data = default_audio_data;
+
+    json speaker = speaker_json_str.empty() ? json::object() : json::parse(speaker_json_str);
+    const tts_type type = getTTSType(speaker);
+    if (type == UNKNOWN) {
+        LOG_ERROR("Unknown TTS version");
+        return "";
+    }
+
+    if (type == OUTETTS_V0_3) {
+        audio_text = std::regex_replace(audio_text, std::regex(R"(<\|text_sep\|>)"), "<|space|>");
+        audio_data = std::regex_replace(audio_data, std::regex(R"(<\|code_start\|>)"), "");
+        audio_data = std::regex_replace(audio_data, std::regex(R"(<\|code_end\|>)"), "<|space|>");
+    }
+
+    if (!speaker_json_str.empty()) {
+        audio_text = audio_text_from_speaker(speaker, type);
+        audio_data = audio_data_from_speaker(speaker, type);
+    }
+
+    return "<|im_start|>\n" + audio_text + process_text(text_to_speak, type) + "<|text_end|>\n" + audio_data + "\n";
+}
+
+std::vector<llama_token> llama_rn_context::getAudioCompletionGuideTokens(const std::string &text_to_speak) {
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    const tts_type type = getTTSType();
+    std::string clean_text = process_text(text_to_speak, type);
+
+    const std::string& delimiter = (type == OUTETTS_V0_3 ? "<|space|>" : "<|text_sep|>");
+
+    std::vector<llama_token> result;
+    size_t start = 0;
+    size_t end = clean_text.find(delimiter);
+
+    //first token is always a newline, as it was not previously added
+    result.push_back(common_tokenize(vocab, "\n", false, true)[0]);
+
+    while (end != std::string::npos) {
+        std::string current_word = clean_text.substr(start, end - start);
+        auto tmp = common_tokenize(vocab, current_word, false, true);
+        result.push_back(tmp[0]);
+        start = end + delimiter.length();
+        end = clean_text.find(delimiter, start);
+    }
+
+    // Add the last part
+    std::string current_word = clean_text.substr(start);
+    auto tmp = common_tokenize(vocab, current_word, false, true);
+    if (tmp.size() > 0) {
+        result.push_back(tmp[0]);
+    }
+    return result;
+}
+
+static void fill_hann_window(int length, bool periodic, float * output) {
+    int offset = -1;
+    if (periodic) {
+        offset = 0;
+    }
+    for (int i = 0; i < length; i++) {
+        output[i] = 0.5 * (1.0 - cosf((2.0 * M_PI * i) / (length + offset)));
+    }
+}
+
+static void twiddle(float * real, float * imag, int k, int N) {
+    float angle = 2 * M_PI * k / N;
+    *real = cos(angle);
+    *imag = sin(angle);
+}
+
+static void irfft(int n, const float * inp_cplx, float * out_real) {
+    int N = n / 2 + 1;
+
+    std::vector<float> real_input(N);
+    std::vector<float> imag_input(N);
+    for (int i = 0; i < N; ++i) {
+        real_input[i] = inp_cplx[2 * i];
+        imag_input[i] = inp_cplx[2 * i + 1];
+    }
+
+    std::vector<float> real_output(n);
+    std::vector<float> imag_output(n);
+
+    for (int k = 0; k < n; ++k) {
+        real_output[k] = 0.0f;
+        imag_output[k] = 0.0f;
+        for (int m = 0; m < N; ++m) {
+            float twiddle_real;
+            float twiddle_imag;
+
+            twiddle(&twiddle_real, &twiddle_imag, k * m, n);
+
+            real_output[k] += real_input[m] * twiddle_real - imag_input[m] * twiddle_imag;
+            imag_output[k] += real_input[m] * twiddle_imag + imag_input[m] * twiddle_real;
+        }
+    }
+
+    for (int i = 0; i < n; ++i) {
+        out_real[i] = real_output[i] / N;
+    }
+}
+
+static void fold(const std::vector<float> & data, int64_t n_out, int64_t n_win, int64_t n_hop, int64_t n_pad, std::vector<float> & output) {
+    int64_t output_height = n_out;
+    int64_t kernel_w = n_win;
+    int64_t stride_w = n_hop;
+    int64_t width    = n_out;
+
+    output.resize(width, 0.0f);
+
+    int64_t col_idx = 0;
+    for (int64_t w_col = 0; w_col < width; ++w_col) {
+        int64_t start = w_col * stride_w - n_pad;
+        int64_t end   = start + kernel_w;
+
+        for (int64_t w_im = start; w_im < end; ++w_im) {
+            if (w_im >= 0 && w_im < output_height && col_idx < (int64_t) data.size()) {
+                output[w_im] += data[col_idx];
+            }
+            col_idx++;
+        }
+    }
+
+    output.resize(n_out - 2 * n_pad);
+}
+
+static std::vector<float> embd_to_audio(
+        const float * embd,
+        const int n_codes,
+        const int n_embd,
+        const int n_thread) {
+    const int n_fft = 1280;
+    const int n_hop = 320;
+    const int n_win = 1280;
+    const int n_pad = (n_win - n_hop)/2;
+    const int n_out = (n_codes - 1)*n_hop + n_win;
+
+    std::vector<float> hann(n_fft);
+
+    fill_hann_window(hann.size(), true, hann.data());
+
+    int n_spec = n_embd*n_codes;
+
+    std::vector<float> E (n_spec);
+    std::vector<float> S (n_spec);
+    std::vector<float> ST(n_spec);
+
+    for (int l = 0; l < n_codes; ++l) {
+        for (int k = 0; k < n_embd; ++k) {
+            E[k*n_codes + l] = embd[l*n_embd + k];
+        }
+    }
+
+    for (int k = 0; k < n_embd/2; ++k) {
+        for (int l = 0; l < n_codes; ++l) {
+            float mag = E[(k           )*n_codes + l];
+            float phi = E[(k + n_embd/2)*n_codes + l];
+
+            mag = exp(mag);
+
+            if (mag > 1e2) {
+                mag = 1e2;
+            }
+            S[2*(k*n_codes + l) + 0] = mag*cosf(phi);
+            S[2*(k*n_codes + l) + 1] = mag*sinf(phi);
+        }
+    }
+
+    for (int l = 0; l < n_codes; ++l) {
+        for (int k = 0; k < n_embd/2; ++k) {
+            ST[l*n_embd + 2*k + 0] = S[2*(k*n_codes + l) + 0];
+            ST[l*n_embd + 2*k + 1] = S[2*(k*n_codes + l) + 1];
+        }
+    }
+
+    std::vector<float> res  (n_codes*n_fft);
+    std::vector<float> hann2(n_codes*n_fft);
+
+    std::vector<std::thread> workers(n_thread);
+    for (int i = 0; i < n_thread; ++i) {
+        workers[i] = std::thread([&, i]() {
+            for (int l = i; l < n_codes; l += n_thread) {
+                irfft(n_fft, ST.data() + l*n_embd, res.data() + l*n_fft);
+                for (int j = 0; j < n_fft; ++j) {
+                    res  [l*n_fft + j] *= hann[j];
+                    hann2[l*n_fft + j]  = hann[j] * hann[j];
+                }
+            }
+        });
+    }
+    for (int i = 0; i < n_thread; ++i) {
+        workers[i].join();
+    }
+
+    std::vector<float> audio;
+    std::vector<float> env;
+
+    fold(res,   n_out, n_win, n_hop, n_pad, audio);
+    fold(hann2, n_out, n_win, n_hop, n_pad, env); // TODO: can be done once
+
+    for (size_t i = 0; i < audio.size(); ++i) {
+        audio[i] /= env[i];
+    }
+
+    return audio;
+}
+
+std::vector<float> llama_rn_context::decodeAudioTokens(const std::vector<llama_token> &tokens) {
+    if (!isVocoderEnabled()) {
+        throw std::runtime_error("Vocoder is not enabled but audio completion is requested");
+    }
+    std::vector<llama_token> tokens_audio = tokens;
+    tts_type type = getTTSType();
+    if (type == OUTETTS_V0_3 || type == OUTETTS_V0_2) {
+        tokens_audio.erase(std::remove_if(tokens_audio.begin(), tokens_audio.end(), [](llama_token t) { return t < 151672 || t > 155772; }), tokens_audio.end());
+        for (auto & token : tokens_audio) {
+            token -= 151672;
+        }
+    } else {
+        LOG_ERROR("Unsupported audio tokens");
+        return std::vector<float>();
+    }
+    const int n_codes = tokens_audio.size();
+    llama_batch batch = llama_batch_init(n_codes, 0, 1);
+    for (size_t i = 0; i < tokens_audio.size(); ++i) {
+        llama_batch_add(&batch, tokens_audio[i], i, { 0 }, true);
+    }
+    if (batch.n_tokens != n_codes) {
+        LOG_ERROR("batch.n_tokens != n_codes: %d != %d", batch.n_tokens, n_codes);
+        return std::vector<float>();
+    }
+    if (llama_encode(vocoder_wrapper->ctx, batch) != 0) {
+        LOG_ERROR("llama_encode() failed");
+        return std::vector<float>();
+    }
+    llama_synchronize(vocoder_wrapper->ctx);
+    const int n_embd = llama_model_n_embd(vocoder_wrapper->model);
+    const float * embd = llama_get_embeddings(vocoder_wrapper->ctx);
+    return embd_to_audio(embd, n_codes, n_embd, params.cpuparams.n_threads);
 }
 
 }

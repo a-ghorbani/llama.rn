@@ -25,9 +25,14 @@ import type {
 import { SchemaGrammarConverter, convertJsonSchemaToGrammar } from './grammar'
 
 export type RNLlamaMessagePart = {
-  type: string,
-  text?: string,
+  type: string
+  text?: string
   image_url?: {
+    url?: string
+  }
+  input_audio?: {
+    format: string
+    data?: string
     url?: string
   }
 }
@@ -57,6 +62,8 @@ export type {
   SchemaGrammarConverterPropOrder,
   SchemaGrammarConverterBuiltinRule,
 }
+
+export const RNLLAMA_MTMD_DEFAULT_MEDIA_MARKER = '<__media__>'
 
 export { SchemaGrammarConverter, convertJsonSchemaToGrammar }
 
@@ -143,7 +150,7 @@ export type CompletionBaseParams = {
   parallel_tool_calls?: object
   tool_choice?: string
   response_format?: CompletionResponseFormat
-  image_paths?: string | string[]
+  media_paths?: string | string[]
 }
 export type CompletionParams = Omit<
   NativeCompletionParams,
@@ -226,7 +233,7 @@ export class LlamaContext {
       tool_choice?: string
     },
   ): Promise<FormattedChatResult | JinjaFormattedChatResult> {
-    const imagePaths: string[] = []
+    const mediaPaths: string[] = []
     const chat = messages.map((msg) => {
       if (Array.isArray(msg.content)) {
         const content = msg.content.map((part) => {
@@ -234,10 +241,28 @@ export class LlamaContext {
           if (part.type === 'image_url') {
             let path = part.image_url?.url || ''
             if (path?.startsWith('file://')) path = path.slice(7)
-            imagePaths.push(path)
+            mediaPaths.push(path)
             return {
               type: 'text',
-              text: '<__image__>',
+              text: RNLLAMA_MTMD_DEFAULT_MEDIA_MARKER,
+            }
+          } else if (part.type === 'input_audio') {
+            const { input_audio: audio } = part
+            if (!audio) throw new Error('input_audio is required')
+
+            const { format } = audio
+            if (format != 'wav' && format != 'mp3') {
+              throw new Error(`Unsupported audio format: ${format}`)
+            }
+            if (audio.url) {
+              const path = audio.url.replace(/file:\/\//, '')
+              mediaPaths.push(path)
+            } else if (audio.data) {
+              mediaPaths.push(audio.data)
+            }
+            return {
+              type: 'text',
+              text: RNLLAMA_MTMD_DEFAULT_MEDIA_MARKER,
             }
           }
           return part
@@ -252,7 +277,7 @@ export class LlamaContext {
     }) as NativeLlamaChatMessage[]
 
     const useJinja = this.isJinjaSupported() && params?.jinja
-    let tmpl = this.isLlamaChatSupported() || useJinja ? undefined : 'chatml'
+    let tmpl
     if (template) tmpl = template // Force replace if provided
     const jsonSchema = getJsonSchema(params?.response_format)
 
@@ -274,14 +299,14 @@ export class LlamaContext {
       return {
         type: 'llama-chat',
         prompt: result as string,
-        has_image: imagePaths.length > 0,
-        image_paths: imagePaths,
+        has_media: mediaPaths.length > 0,
+        media_paths: mediaPaths,
       }
     }
     const jinjaResult = result as JinjaFormattedChatResult
     jinjaResult.type = 'jinja'
-    jinjaResult.has_image = imagePaths.length > 0
-    jinjaResult.image_paths = imagePaths
+    jinjaResult.has_media = mediaPaths.length > 0
+    jinjaResult.media_paths = mediaPaths
     return jinjaResult
   }
 
@@ -291,7 +316,7 @@ export class LlamaContext {
    * @param callback Optional callback for token-by-token streaming
    * @returns Promise resolving to the completion result
    *
-   * Note: For multimodal support, you can include an image_paths parameter.
+   * Note: For multimodal support, you can include an media_paths parameter.
    * This will process the images and add them to the context before generating text.
    * Multimodal support must be enabled via initMultimodal() first.
    */
@@ -333,23 +358,23 @@ export class LlamaContext {
           if (!nativeParams.stop) nativeParams.stop = []
           nativeParams.stop.push(...jinjaResult.additional_stops)
         }
-        if (jinjaResult.has_image) {
-          nativeParams.image_paths = jinjaResult.image_paths
+        if (jinjaResult.has_media) {
+          nativeParams.media_paths = jinjaResult.media_paths
         }
       } else if (formattedResult.type === 'llama-chat') {
         const llamaChatResult = formattedResult as FormattedChatResult
         nativeParams.prompt = llamaChatResult.prompt || ''
-        if (llamaChatResult.has_image) {
-          nativeParams.image_paths = llamaChatResult.image_paths
+        if (llamaChatResult.has_media) {
+          nativeParams.media_paths = llamaChatResult.media_paths
         }
       }
     } else {
       nativeParams.prompt = params.prompt || ''
     }
 
-    // If image_paths were explicitly provided or extracted from messages, use them
-    if (!nativeParams.image_paths && params.image_paths) {
-      nativeParams.image_paths = params.image_paths
+    // If media_paths were explicitly provided or extracted from messages, use them
+    if (!nativeParams.media_paths && params.media_paths) {
+      nativeParams.media_paths = params.media_paths
     }
 
     if (nativeParams.response_format && !nativeParams.grammar) {
@@ -385,8 +410,21 @@ export class LlamaContext {
     return RNLlama.stopCompletion(this.id)
   }
 
-  tokenize(text: string): Promise<NativeTokenizeResult> {
-    return RNLlama.tokenize(this.id, text)
+  /**
+   * Tokenize text or text with images
+   * @param text Text to tokenize
+   * @param params.media_paths Array of image paths to tokenize (if multimodal is enabled)
+   * @returns Promise resolving to the tokenize result
+   */
+  tokenize(
+    text: string,
+    {
+      media_paths: mediaPaths,
+    }: {
+      media_paths?: string[]
+    } = {},
+  ): Promise<NativeTokenizeResult> {
+    return RNLlama.tokenize(this.id, text, mediaPaths)
   }
 
   detokenize(tokens: number[]): Promise<string> {
@@ -472,11 +510,86 @@ export class LlamaContext {
   }
 
   /**
+   * Check multimodal support
+   * @returns Promise resolving to an object with vision and audio support
+   */
+  async getMultimodalSupport(): Promise<{
+    vision: boolean
+    audio: boolean
+  }> {
+    return await RNLlama.getMultimodalSupport(this.id)
+  }
+
+  /**
    * Release multimodal support
    * @returns Promise resolving to void
    */
   async releaseMultimodal(): Promise<void> {
     return await RNLlama.releaseMultimodal(this.id)
+  }
+
+  /**
+   * Initialize TTS support with a vocoder model
+   * @param params Parameters for TTS support
+   * @param params.path Path to the vocoder model
+   * @returns Promise resolving to true if initialization was successful
+   */
+  async initVocoder({ path }: { path: string }): Promise<boolean> {
+    if (path.startsWith('file://')) path = path.slice(7)
+    return await RNLlama.initVocoder(this.id, path)
+  }
+
+  /**
+   * Check if TTS support is enabled
+   * @returns Promise resolving to true if TTS is enabled
+   */
+  async isVocoderEnabled(): Promise<boolean> {
+    return await RNLlama.isVocoderEnabled(this.id)
+  }
+
+  /**
+   * Get a formatted audio completion prompt
+   * @param speakerJsonStr JSON string representing the speaker
+   * @param textToSpeak Text to speak
+   * @returns Promise resolving to the formatted audio completion prompt
+   */
+  async getFormattedAudioCompletion(
+    speaker: object | null,
+    textToSpeak: string,
+  ): Promise<string> {
+    return await RNLlama.getFormattedAudioCompletion(
+      this.id,
+      speaker ? JSON.stringify(speaker) : '',
+      textToSpeak,
+    )
+  }
+
+  /**
+   * Get guide tokens for audio completion
+   * @param textToSpeak Text to speak
+   * @returns Promise resolving to the guide tokens
+   */
+  async getAudioCompletionGuideTokens(
+    textToSpeak: string,
+  ): Promise<Array<number>> {
+    return await RNLlama.getAudioCompletionGuideTokens(this.id, textToSpeak)
+  }
+
+  /**
+   * Decode audio tokens
+   * @param tokens Array of audio tokens
+   * @returns Promise resolving to the decoded audio tokens
+   */
+  async decodeAudioTokens(tokens: number[]): Promise<Array<number>> {
+    return await RNLlama.decodeAudioTokens(this.id, tokens)
+  }
+
+  /**
+   * Release TTS support
+   * @returns Promise resolving to void
+   */
+  async releaseVocoder(): Promise<void> {
+    return await RNLlama.releaseVocoder(this.id)
   }
 
   async release(): Promise<void> {

@@ -239,10 +239,21 @@ public class LlamaContext {
       }
     }
 
+    int[] guide_tokens = null;
+    if (params.hasKey("guide_tokens")) {
+      ReadableArray guide_tokens_array = params.getArray("guide_tokens");
+      guide_tokens = new int[guide_tokens_array.size()];
+      for (int i = 0; i < guide_tokens_array.size(); i++) {
+        guide_tokens[i] = (int) guide_tokens_array.getDouble(i);
+      }
+    }
+
     WritableMap result = doCompletion(
       this.context,
       // String prompt,
       params.getString("prompt"),
+      // int[] guide_tokens,
+      guide_tokens,
       // int chat_format,
       params.hasKey("chat_format") ? params.getInt("chat_format") : 0,
       // String grammar,
@@ -309,8 +320,8 @@ public class LlamaContext {
       params.hasKey("top_n_sigma") ? (float) params.getDouble("top_n_sigma") : -1.0f,
       // String[] dry_sequence_breakers, when undef, we use the default definition from common.h
       params.hasKey("dry_sequence_breakers") ? params.getArray("dry_sequence_breakers").toArrayList().toArray(new String[0]) : new String[]{"\n", ":", "\"", "*"},
-      // String[] image_paths
-      params.hasKey("image_paths") ? params.getArray("image_paths").toArrayList().toArray(new String[0]) : new String[0],
+      // String[] media_paths
+      params.hasKey("media_paths") ? params.getArray("media_paths").toArrayList().toArray(new String[0]) : new String[0],
       // PartialCompletionCallback partial_completion_callback
       new PartialCompletionCallback(
         this,
@@ -331,10 +342,8 @@ public class LlamaContext {
     return isPredicting(this.context);
   }
 
-  public WritableMap tokenize(String text) {
-    WritableMap result = Arguments.createMap();
-    result.putArray("tokens", tokenize(this.context, text));
-    return result;
+  public WritableMap tokenize(String text, ReadableArray media_paths) {
+    return tokenize(this.context, text, media_paths == null ? new String[0] : media_paths.toArrayList().toArray(new String[0]));
   }
 
   public String detokenize(ReadableArray tokens) {
@@ -398,8 +407,43 @@ public class LlamaContext {
     return isMultimodalEnabled(this.context);
   }
 
+  public WritableMap getMultimodalSupport() {
+    if (!isMultimodalEnabled()) {
+      throw new IllegalStateException("Multimodal is not enabled");
+    }
+    return getMultimodalSupport(this.context);
+  }
+
   public void releaseMultimodal() {
     releaseMultimodal(this.context);
+  }
+
+  public boolean initVocoder(String vocoderModelPath) {
+    return initVocoder(this.context, vocoderModelPath);
+  }
+
+  public boolean isVocoderEnabled() {
+    return isVocoderEnabled(this.context);
+  }
+
+  public String getFormattedAudioCompletion(String speakerJsonStr, String textToSpeak) {
+    return getFormattedAudioCompletion(this.context, speakerJsonStr, textToSpeak);
+  }
+
+  public WritableArray getAudioCompletionGuideTokens(String textToSpeak) {
+    return getAudioCompletionGuideTokens(this.context, textToSpeak);
+  }
+
+  public WritableArray decodeAudioTokens(ReadableArray tokens) {
+    int[] toks = new int[tokens.size()];
+    for (int i = 0; i < tokens.size(); i++) {
+      toks[i] = (int) tokens.getDouble(i);
+    }
+    return decodeAudioTokens(this.context, toks);
+  }
+
+  public void releaseVocoder() {
+    releaseVocoder(this.context);
   }
 
   public void release() {
@@ -522,6 +566,7 @@ public class LlamaContext {
   );
   protected static native boolean initMultimodal(long contextPtr, String mmproj_path, boolean MMPROJ_USE_GPU);
   protected static native boolean isMultimodalEnabled(long contextPtr);
+  protected static native WritableMap getMultimodalSupport(long contextPtr);
   protected static native void interruptLoad(long contextPtr);
   protected static native WritableMap loadModelDetails(
     long contextPtr
@@ -552,6 +597,7 @@ public class LlamaContext {
   protected static native WritableMap doCompletion(
     long context_ptr,
     String prompt,
+    int[] guide_tokens,
     int chat_format,
     String grammar,
     String json_schema,
@@ -585,12 +631,12 @@ public class LlamaContext {
     int dry_penalty_last_n,
     float top_n_sigma,
     String[] dry_sequence_breakers,
-    String[] image_paths,
+    String[] media_paths,
     PartialCompletionCallback partial_completion_callback
   );
   protected static native void stopCompletion(long contextPtr);
   protected static native boolean isPredicting(long contextPtr);
-  protected static native WritableArray tokenize(long contextPtr, String text);
+  protected static native WritableMap tokenize(long contextPtr, String text, String[] media_paths);
   protected static native String detokenize(long contextPtr, int[] tokens);
   protected static native boolean isEmbeddingEnabled(long contextPtr);
   protected static native WritableMap embedding(
@@ -606,4 +652,10 @@ public class LlamaContext {
   protected static native void setupLog(NativeLogCallback logCallback);
   protected static native void unsetLog();
   protected static native void releaseMultimodal(long contextPtr);
+  protected static native boolean isVocoderEnabled(long contextPtr);
+  protected static native String getFormattedAudioCompletion(long contextPtr, String speakerJsonStr, String textToSpeak);
+  protected static native WritableArray getAudioCompletionGuideTokens(long contextPtr, String textToSpeak);
+  protected static native WritableArray decodeAudioTokens(long contextPtr, int[] tokens);
+  protected static native boolean initVocoder(long contextPtr, String vocoderModelPath);
+  protected static native void releaseVocoder(long contextPtr);
 }
