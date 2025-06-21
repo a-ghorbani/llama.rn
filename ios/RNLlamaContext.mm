@@ -90,13 +90,6 @@
         NSLog(@"chatTemplate: %@", chatTemplate);
     }
 
-    NSString *reasoningFormat = params[@"reasoning_format"];
-    if (reasoningFormat && [reasoningFormat isEqualToString:@"deepseek"]) {
-        defaultParams.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
-    } else {
-        defaultParams.reasoning_format = COMMON_REASONING_FORMAT_NONE;
-    }
-
     if (params[@"n_ctx"]) defaultParams.n_ctx = [params[@"n_ctx"] intValue];
     if (params[@"use_mlock"]) defaultParams.use_mlock = [params[@"use_mlock"]boolValue];
 
@@ -614,6 +607,9 @@
     } catch (const std::exception &e) {
         llama->endCompletion();
         @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
+    } catch (const std::runtime_error& e) {
+        llama->endCompletion();
+        @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
     }
 
     if (llama->context_full) {
@@ -690,7 +686,19 @@
     if (!llama->is_interrupted) {
         try {
             auto chat_format = params[@"chat_format"] ? [params[@"chat_format"] intValue] : COMMON_CHAT_FORMAT_CONTENT_ONLY;
-            common_chat_msg message = common_chat_parse(llama->generated_text, static_cast<common_chat_format>(chat_format));
+            common_chat_syntax chat_syntax;
+            chat_syntax.format = static_cast<common_chat_format>(chat_format);
+
+            NSString *reasoningFormat = params[@"reasoning_format"];
+            if (reasoningFormat && [reasoningFormat isEqualToString:@"deepseek"]) {
+                chat_syntax.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+            } else if (reasoningFormat && [reasoningFormat isEqualToString:@"deepseek-legacy"]) {
+                chat_syntax.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY;
+            } else {
+                chat_syntax.reasoning_format = COMMON_REASONING_FORMAT_NONE;
+            }
+
+            common_chat_msg message = common_chat_parse(llama->generated_text, false, chat_syntax);
             if (!message.reasoning_content.empty()) {
                 reasoningContent = [NSString stringWithUTF8String:message.reasoning_content.c_str()];
             }
@@ -726,7 +734,7 @@
     result[@"stopped_limit"] = @(llama->stopped_limit);
     result[@"stopping_word"] = [NSString stringWithUTF8String:llama->stopping_word.c_str()];
     result[@"tokens_cached"] = @(llama->n_past);
-    
+
     if (llama->isVocoderEnabled() && !llama->audio_tokens.empty()) {
         NSMutableArray *audioTokens = [[NSMutableArray alloc] init];
         for (llama_token token : llama->audio_tokens) {
@@ -734,7 +742,7 @@
         }
         result[@"audio_tokens"] = audioTokens;
     }
-    
+
     result[@"timings"] = @{
         @"prompt_n": @(timings.n_p_eval),
         @"prompt_ms": @(timings.t_p_eval_ms),
@@ -794,6 +802,8 @@
         return result;
     } catch (const std::exception &e) {
         @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
+    } catch (const std::runtime_error& e) {
+        @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
     }
 }
 
@@ -834,6 +844,9 @@
     try {
       llama->loadPrompt({});
     } catch (const std::exception &e) {
+      llama->endCompletion();
+      @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
+    } catch (const std::runtime_error& e) {
       llama->endCompletion();
       @throw [NSException exceptionWithName:@"LlamaException" reason:[NSString stringWithUTF8String:e.what()] userInfo:nil];
     }
