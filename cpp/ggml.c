@@ -61,9 +61,6 @@
 #define m512i(p) (__m512i)(p)
 #endif
 
-// precomputed f32 table for f16 (256 KB) (ggml-impl.h)
-float lm_ggml_table_f32_f16[1 << 16];
-
 #if defined(__linux__) || \
     defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
     (defined(__APPLE__) && !TARGET_OS_TV && !TARGET_OS_WATCH)
@@ -955,6 +952,7 @@ static const char * LM_GGML_OP_NAME[LM_GGML_OP_COUNT] = {
     "UPSCALE",
     "PAD",
     "PAD_REFLECT_1D",
+    "ROLL",
     "ARANGE",
     "TIMESTEP_EMBEDDING",
     "ARGSORT",
@@ -985,7 +983,7 @@ static const char * LM_GGML_OP_NAME[LM_GGML_OP_COUNT] = {
     "OPT_STEP_ADAMW",
 };
 
-static_assert(LM_GGML_OP_COUNT == 82, "LM_GGML_OP_COUNT != 82");
+static_assert(LM_GGML_OP_COUNT == 83, "LM_GGML_OP_COUNT != 83");
 
 static const char * LM_GGML_OP_SYMBOL[LM_GGML_OP_COUNT] = {
     "none",
@@ -1050,6 +1048,7 @@ static const char * LM_GGML_OP_SYMBOL[LM_GGML_OP_COUNT] = {
     "upscale(x)",
     "pad(x)",
     "pad_reflect_1d(x)",
+    "roll(x)",
     "arange(start, stop, step)",
     "timestep_embedding(timesteps, dim, max_period)",
     "argsort(x)",
@@ -1080,7 +1079,7 @@ static const char * LM_GGML_OP_SYMBOL[LM_GGML_OP_COUNT] = {
     "adamw(x)",
 };
 
-static_assert(LM_GGML_OP_COUNT == 82, "LM_GGML_OP_COUNT != 82");
+static_assert(LM_GGML_OP_COUNT == 83, "LM_GGML_OP_COUNT != 83");
 
 static_assert(LM_GGML_OP_POOL_COUNT == 2, "LM_GGML_OP_POOL_COUNT != 2");
 
@@ -1419,14 +1418,6 @@ struct lm_ggml_context * lm_ggml_init(struct lm_ggml_init_params params) {
     if (is_first_call) {
         // initialize time system (required on Windows)
         lm_ggml_time_init();
-
-        for (int i = 0; i < (1 << 16); ++i) {
-            union {
-                uint16_t u16;
-                lm_ggml_fp16_t fp16;
-            } u = {i};
-            lm_ggml_table_f32_f16[i] = LM_GGML_COMPUTE_FP16_TO_FP32(u.fp16);
-        }
 
         is_first_call = false;
     }
@@ -4336,6 +4327,34 @@ struct lm_ggml_tensor * lm_ggml_pad_reflect_1d(
     lm_ggml_set_op_params(result, params, sizeof(params));
 
     result->op     = LM_GGML_OP_PAD_REFLECT_1D;
+    result->src[0] = a;
+
+    return result;
+}
+
+// lm_ggml_roll
+
+struct lm_ggml_tensor * lm_ggml_roll(
+        struct lm_ggml_context * ctx,
+        struct lm_ggml_tensor  * a,
+        int                   shift0,
+        int                   shift1,
+        int                   shift2,
+        int                   shift3) {
+    LM_GGML_ASSERT(a->nb[0] == lm_ggml_type_size(a->type));
+    LM_GGML_ASSERT(abs(shift0) < a->ne[0]);
+    LM_GGML_ASSERT(abs(shift1) < a->ne[1]);
+    LM_GGML_ASSERT(abs(shift2) < a->ne[2]);
+    LM_GGML_ASSERT(abs(shift3) < a->ne[3]);
+
+    struct lm_ggml_tensor * result = lm_ggml_dup_tensor(ctx, a);
+
+    lm_ggml_set_op_params_i32(result, 0, shift0);
+    lm_ggml_set_op_params_i32(result, 1, shift1);
+    lm_ggml_set_op_params_i32(result, 2, shift2);
+    lm_ggml_set_op_params_i32(result, 3, shift3);
+
+    result->op     = LM_GGML_OP_ROLL;
     result->src[0] = a;
 
     return result;
