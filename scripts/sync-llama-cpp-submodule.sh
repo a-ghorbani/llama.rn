@@ -11,7 +11,16 @@ git fetch origin main
 git push origin --delete "$STAGING_BRANCH" 2>/dev/null || echo "No existing staging branch to delete"
 git branch -D "$STAGING_BRANCH" 2>/dev/null || echo "No local staging branch to delete"
 
-git checkout -B "$STAGING_BRANCH" origin/main
+# Check if persistent sync branch exists and use it as base, otherwise use main
+WORK_BRANCH="auto/sync-llama.cpp"
+if git show-ref --verify --quiet refs/remotes/origin/"$WORK_BRANCH"; then
+  echo "📦 Using existing sync branch as base: $WORK_BRANCH"
+  git fetch origin "$WORK_BRANCH"
+  git checkout -B "$STAGING_BRANCH" origin/"$WORK_BRANCH"
+else
+  echo "🆕 Using main as base (no existing sync branch)"
+  git checkout -B "$STAGING_BRANCH" origin/main
+fi
 
 echo "🔍 Checking latest llama.cpp release..."
 LATEST_TAG=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest | jq -r .tag_name)
