@@ -1,6 +1,6 @@
 {
-  "name": "llama.rn",
-  "version": "0.6.5",
+  "name": "@pocketpalai/llama.rn",
+  "version": "0.6.5-1",
   "description": "React Native binding of llama.cpp",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
@@ -54,13 +54,16 @@
     "llama",
     "llama-2"
   ],
-  "repository": "https://github.com/mybigday/llama.rn",
-  "author": "Jhen-Jie Hong <developer@jhen.me> (https://github.com/mybigday)",
-  "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/mybigday/llama.rn/issues"
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/a-ghorbani/llama.rn"
   },
-  "homepage": "https://github.com/mybigday/llama.rn#readme",
+  "author": "Asghar Ghorbani <info@llm-ventures.com>",
+  "contributors": [
+    "Jhen-Jie Hong <developer@jhen.me> (https://github.com/mybigday)"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/a-ghorbani/llama.rn#readme",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
