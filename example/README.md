@@ -9,7 +9,7 @@ For iPhone/iPad/Mac, you can try it by downloading our test app from [TestFlight
 The example app demonstrates various local LLM capabilities:
 
 - **💬 Simple Chat** - Basic chat interface with text generation ([SimpleChatScreen.tsx](src/screens/SimpleChatScreen.tsx))
-- **👁️ Vision/Multimodal** - Image analysis and visual question answering ([MultimodalScreen.tsx](src/screens/MultimodalScreen.tsx))
+- **👁️ Multimodal** - Image/audio analysis and visual/audio question answering ([MultimodalScreen.tsx](src/screens/MultimodalScreen.tsx))
 - **🛠️ Tool Calling** - Advanced function calling capabilities ([ToolCallsScreen.tsx](src/screens/ToolCallsScreen.tsx))
 - **🔊 Text-to-Speech** - Local voice synthesis with OuteTTS ([TTSScreen.tsx](src/screens/TTSScreen.tsx))
 - **📊 Model Info** - Model diagnostics and system information ([ModelInfoScreen.tsx](src/screens/ModelInfoScreen.tsx))
@@ -70,3 +70,13 @@ RNLLAMA_BUILD_FROM_SOURCE=0 npm run pods
 ```
 
 Android: Edit `android/gradle.properties` and set `rnllamaBuildFromSource` to `false`.
+
+## Roadmap
+
+The following features are planned for future updates:
+
+- [x] **🔧 Add custom model modal** - Interface for loading and managing custom models
+- [ ] **🛠️ ToolCallsScreen: Support MCP** - Integrate Model Context Protocol via [`mcp-sdk-client-ssejs`](https://github.com/mybigday/mcp-sdk-client-ssejs)
+- [ ] **📊 Add embedding example** - Demonstrate text embedding and similarity search capabilities
+- [ ] **🔍 Add reranker example** - Show document reranking for improved search relevance
+- [ ] **⚙️ Check hardware requirement for model** - Validate device capabilities before model loading

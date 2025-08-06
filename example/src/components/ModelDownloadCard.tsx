@@ -52,7 +52,7 @@ interface TTSModelDownloadCardProps {
   initializeButtonText?: string
 }
 
-interface VLMModelDownloadCardProps {
+interface MtmdModelDownloadCardProps {
   title: string
   repo: string
   filename: string
@@ -399,7 +399,7 @@ function BaseModelDownloadCard({
             />
           </View>
           <Text style={styles.progressText}>
-            {downloadStatus} 
+            {downloadStatus}
             {' '}
             {`${progress.percentage}%`}
           </Text>
@@ -512,8 +512,8 @@ export function TTSModelDownloadCard({
   )
 }
 
-// VLM-specific download card that handles both model and mmproj files
-export function VLMModelDownloadCard({
+// Multimodal-specific download card that handles both model and mmproj files
+export function MtmdModelDownloadCard({
   title,
   repo,
   filename,
@@ -521,9 +521,9 @@ export function VLMModelDownloadCard({
   size,
   onInitialize,
   initializeButtonText,
-}: VLMModelDownloadCardProps) {
+}: MtmdModelDownloadCardProps) {
   const files: ModelFile[] = [
-    { repo, filename, label: 'VLM model' },
+    { repo, filename, label: 'Model' },
     { repo, filename: mmproj, label: 'mmproj' },
   ]
 
@@ -533,7 +533,7 @@ export function VLMModelDownloadCard({
       size={size}
       files={files}
       onInitialize={onInitialize}
-      downloadButtonText="Download VLM & MMProj"
+      downloadButtonText="Download Model & MMProj"
       initializeButtonText={initializeButtonText}
     />
   )

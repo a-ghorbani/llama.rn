@@ -83,13 +83,6 @@ export const CommonStyles = StyleSheet.create({
   },
 
   // Text styles
-  setupTitle: {
-    fontSize: FontSizes.xxlarge,
-    fontWeight: 'bold',
-    color: Colors.text,
-    marginBottom: Spacing.sm,
-    textAlign: 'center',
-  },
   setupDescription: {
     fontSize: FontSizes.large,
     color: Colors.textSecondary,
@@ -290,5 +283,38 @@ export const CommonStyles = StyleSheet.create({
   },
   marginTop: {
     marginTop: Spacing.lg,
+  },
+
+  // Custom Model Styles
+  modelSectionTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginTop: 8,
+    marginBottom: 8,
+    letterSpacing: -0.3,
+  },
+  addCustomModelButton: {
+    backgroundColor: '#2563eb',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    marginHorizontal: 16,
+    marginVertical: 12,
+    shadowColor: '#2563eb',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  addCustomModelButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+    letterSpacing: -0.2,
+  },
+  customModelDefaultSection: {
+    marginTop: 8,
   },
 })
