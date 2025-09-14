@@ -190,6 +190,7 @@ static const struct lm_ggml_backend_i lm_ggml_backend_cpu_i = {
     /* .graph_compute           = */ lm_ggml_backend_cpu_graph_compute,
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
+    /* .optimize_graph          = */ NULL,
 };
 
 static lm_ggml_guid_t lm_ggml_backend_cpu_guid(void) {
@@ -348,8 +349,10 @@ static void lm_ggml_backend_cpu_device_get_memory(lm_ggml_backend_dev_t dev, siz
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_size = sysconf(_SC_PAGE_SIZE);
     *total = pages * page_size;
+
+    // "free" system memory is ill-defined, for practical purposes assume that all of it is free:
     *free = *total;
-#endif
+#endif // _WIN32
 
     LM_GGML_UNUSED(dev);
 }
@@ -575,9 +578,6 @@ static lm_ggml_backend_feature * lm_ggml_backend_cpu_get_features(lm_ggml_backen
         }
         if (lm_ggml_cpu_has_vxe()) {
             features.push_back({ "VXE", "1" });
-        }
-        if (lm_ggml_cpu_has_nnpa()) {
-            features.push_back({ "NNPA", "1" });
         }
         if (lm_ggml_cpu_has_wasm_simd()) {
             features.push_back({ "WASM_SIMD", "1" });

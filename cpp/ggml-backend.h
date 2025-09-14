@@ -132,6 +132,8 @@ extern "C" {
         LM_GGML_BACKEND_DEVICE_TYPE_CPU,
         // GPU device using dedicated memory
         LM_GGML_BACKEND_DEVICE_TYPE_GPU,
+        // integrated GPU device using host memory
+        LM_GGML_BACKEND_DEVICE_TYPE_IGPU,
         // accelerator devices intended to be used together with the CPU backend (e.g. BLAS or AMX)
         LM_GGML_BACKEND_DEVICE_TYPE_ACCEL
     };
@@ -150,11 +152,21 @@ extern "C" {
 
     // all the device properties
     struct lm_ggml_backend_dev_props {
+        // device name
         const char * name;
+        // device description
         const char * description;
+        // device free memory in bytes
         size_t memory_free;
+        // device total memory in bytes
         size_t memory_total;
+        // device type
         enum lm_ggml_backend_dev_type type;
+        // device id
+        //   for PCI devices, this should be the PCI bus id formatted as "domain:bus:device.function" (e.g. "0000:01:00.0")
+        //   if the id is unknown, this should be NULL
+        const char * device_id;
+        // device capabilities
         struct lm_ggml_backend_dev_caps caps;
     };
 
@@ -306,6 +318,9 @@ extern "C" {
 
     LM_GGML_API void                 lm_ggml_backend_sched_set_tensor_backend(lm_ggml_backend_sched_t sched, struct lm_ggml_tensor * node, lm_ggml_backend_t backend);
     LM_GGML_API lm_ggml_backend_t       lm_ggml_backend_sched_get_tensor_backend(lm_ggml_backend_sched_t sched, struct lm_ggml_tensor * node);
+
+    // Split graph without allocating it
+    LM_GGML_API void                 lm_ggml_backend_sched_split_graph(lm_ggml_backend_sched_t sched, struct lm_ggml_cgraph * graph);
 
     // Allocate and compute graph on the backend scheduler
     LM_GGML_API bool                 lm_ggml_backend_sched_alloc_graph(lm_ggml_backend_sched_t sched, struct lm_ggml_cgraph * graph); // returns success
