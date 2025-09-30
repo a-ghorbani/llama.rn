@@ -3685,7 +3685,7 @@ struct lm_ggml_tensor * lm_ggml_set_rows(
     LM_GGML_ASSERT(b->ne[3] % c->ne[2] == 0);
     LM_GGML_ASSERT(c->ne[3] == 1);
     LM_GGML_ASSERT(b->type == LM_GGML_TYPE_F32);
-    LM_GGML_ASSERT(c->type == LM_GGML_TYPE_I64);
+    LM_GGML_ASSERT(c->type == LM_GGML_TYPE_I64 || c->type == LM_GGML_TYPE_I32);
 
     LM_GGML_ASSERT(lm_ggml_is_contiguous_rows(a));
     LM_GGML_ASSERT(lm_ggml_is_contiguous_rows(b));
@@ -3695,6 +3695,7 @@ struct lm_ggml_tensor * lm_ggml_set_rows(
     result->op     = LM_GGML_OP_SET_ROWS;
     result->src[0] = b;
     result->src[1] = c;
+    result->src[2] = a; // note: order is weird due to legacy reasons (https://github.com/ggml-org/llama.cpp/pull/16063#discussion_r2385795931)
 
     return result;
 }
@@ -3935,7 +3936,7 @@ static struct lm_ggml_tensor * lm_ggml_rope_impl(
     memcpy(params +  8, &attn_factor,  sizeof(float));
     memcpy(params +  9, &beta_fast,    sizeof(float));
     memcpy(params + 10, &beta_slow,    sizeof(float));
-    if (mrope_used) {
+    if (mrope_used && sections) {
         memcpy(params + 11, sections,  sizeof(int32_t) * LM_GGML_MROPE_SECTIONS);
     } else {
         memset(params + 11, 0,         sizeof(int32_t) * LM_GGML_MROPE_SECTIONS);
@@ -4931,12 +4932,8 @@ struct lm_ggml_tensor * lm_ggml_timestep_embedding(
         struct lm_ggml_tensor  * timesteps,
         int                   dim,
         int                   max_period) {
-    int actual_dim = dim;
-    if (dim % 2 != 0) {
-        actual_dim = dim + 1;
-    }
 
-    struct lm_ggml_tensor * result = lm_ggml_new_tensor_2d(ctx, LM_GGML_TYPE_F32, actual_dim, timesteps->ne[0]);
+    struct lm_ggml_tensor * result = lm_ggml_new_tensor_2d(ctx, LM_GGML_TYPE_F32, dim, timesteps->ne[0]);
 
     lm_ggml_set_op_params_i32(result, 0, dim);
     lm_ggml_set_op_params_i32(result, 1, max_period);
