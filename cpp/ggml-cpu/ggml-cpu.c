@@ -689,8 +689,13 @@ bool lm_ggml_is_numa(void) {
 #endif
 
 static void lm_ggml_init_arm_arch_features(void) {
-#if defined(__linux__) && defined(__aarch64__) && defined(__ARM_FEATURE_SVE)
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SVE)
+#if defined(__linux__)
     lm_ggml_arm_arch_features.sve_cnt = PR_SVE_VL_LEN_MASK & prctl(PR_SVE_GET_VL);
+#else
+    // TODO: add support of SVE for non-linux systems
+#error "TODO: SVE is not supported on this platform. To use SVE, sve_cnt needs to be initialized here."
+#endif
 #endif
 }
 
@@ -2187,6 +2192,7 @@ static int lm_ggml_get_n_tasks(struct lm_ggml_tensor * node, int n_threads) {
                 case LM_GGML_UNARY_OP_GELU_ERF:
                 case LM_GGML_UNARY_OP_GELU_QUICK:
                 case LM_GGML_UNARY_OP_SILU:
+                case LM_GGML_UNARY_OP_XIELU:
                     {
                         n_tasks = n_threads;
                     } break;
