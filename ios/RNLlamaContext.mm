@@ -100,6 +100,11 @@
     return info;
 }
 
++ (NSString *)getBackendDevicesInfo {
+    std::string devices_info_json = rnllama::get_backend_devices_info();
+    return [NSString stringWithUTF8String:devices_info_json.c_str()];
+}
+
 + (instancetype)initWithParams:(NSDictionary *)params onProgress:(void (^)(unsigned int progress))onProgress {
     // llama_backend_init(false);
     common_params defaultParams;
@@ -166,7 +171,9 @@
             lm_ggml_backend_dev_t dev = lm_ggml_backend_dev_get(i);
             switch (lm_ggml_backend_dev_type(dev)) {
                 case LM_GGML_BACKEND_DEVICE_TYPE_CPU:
+#ifndef TARGET_OS_SIMULATOR
                 case LM_GGML_BACKEND_DEVICE_TYPE_ACCEL:
+#endif
                     cpu_devs.push_back(dev);
                     break;
                 case LM_GGML_BACKEND_DEVICE_TYPE_GPU:
@@ -1373,6 +1380,33 @@
     NSString *prefillText = params[@"prefill_text"];
     std::string prefill_text_str = prefillText ? [prefillText UTF8String] : "";
 
+    // Get state parameters
+    std::string load_state_path;
+    std::string save_state_path;
+    int32_t save_state_size = -1;
+
+    if (params[@"load_state_path"] && [params[@"load_state_path"] isKindOfClass:[NSString class]]) {
+        NSString *path = params[@"load_state_path"];
+        // Remove file:// prefix if present
+        if ([path hasPrefix:@"file://"]) {
+            path = [path substringFromIndex:7];
+        }
+        load_state_path = [path UTF8String];
+    }
+
+    if (params[@"save_state_path"] && [params[@"save_state_path"] isKindOfClass:[NSString class]]) {
+        NSString *path = params[@"save_state_path"];
+        // Remove file:// prefix if present
+        if ([path hasPrefix:@"file://"]) {
+            path = [path substringFromIndex:7];
+        }
+        save_state_path = [path UTF8String];
+    }
+
+    if (params[@"save_state_size"] && [params[@"save_state_size"] isKindOfClass:[NSNumber class]]) {
+        save_state_size = [params[@"save_state_size"] intValue];
+    }
+
     // Copy blocks to ensure they're retained on the heap for async use
     void (^onTokenCopy)(NSMutableDictionary *) = [onToken copy];
     void (^onCompleteCopy)(NSDictionary *) = [onComplete copy];
@@ -1461,6 +1495,10 @@
         bool context_full = slot->context_full;
         bool incomplete = slot->incomplete;
         int n_decoded = slot->n_decoded;
+        std::string error_message = slot->error_message;
+
+        // Get timings
+        rnllama::slot_timings timings = slot->get_timings();
 
         // Parse final chat output
         rnllama::completion_chat_output final_output;
@@ -1482,6 +1520,24 @@
             result[@"context_full"] = @(context_full);
             result[@"incomplete"] = @(incomplete);
             result[@"n_decoded"] = @(n_decoded);
+
+            // Add timings
+            result[@"timings"] = @{
+                @"cache_n": @(timings.cache_n),
+                @"prompt_n": @(timings.prompt_n),
+                @"prompt_ms": @(timings.prompt_ms),
+                @"prompt_per_token_ms": @(timings.prompt_per_token_ms),
+                @"prompt_per_second": @(timings.prompt_per_second),
+                @"predicted_n": @(timings.predicted_n),
+                @"predicted_ms": @(timings.predicted_ms),
+                @"predicted_per_token_ms": @(timings.predicted_per_token_ms),
+                @"predicted_per_second": @(timings.predicted_per_second)
+            };
+
+            // Add error message if present
+            if (!error_message.empty()) {
+                result[@"error"] = [NSString stringWithUTF8String:error_message.c_str()];
+            }
 
             // Add parsed chat output (final)
             if (has_final_output) {
@@ -1523,6 +1579,9 @@
         reasoning_format,
         thinking_forced_open,
         prefill_text_str,
+        load_state_path,
+        save_state_path,
+        save_state_size,
         token_callback,
         complete_callback
     );

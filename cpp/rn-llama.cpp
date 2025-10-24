@@ -3,6 +3,7 @@
 #include "rn-mtmd.hpp"
 #include "rn-completion.h"
 #include "rn-slot-manager.h"
+#include "rn-common.hpp"
 
 // Include multimodal support
 #include "tools/mtmd/mtmd.h"
@@ -12,6 +13,10 @@
 #include <cstdarg>
 
 namespace rnllama {
+
+std::string get_backend_devices_info() {
+    return backend_devices_info();
+}
 
 static const std::vector<lm_ggml_type> kv_cache_types = {
     LM_GGML_TYPE_F32,

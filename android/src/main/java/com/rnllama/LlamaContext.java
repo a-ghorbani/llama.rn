@@ -557,41 +557,41 @@ public class LlamaContext {
 
     if (LlamaContext.isArm64V8a()) {
       if (hasDotProd && hasI8mm && hasAdreno) {
-        Log.d(NAME, "Loading librnllama_v8_2_dotprod_i8mm_opencl.so");
+        Log.d(NAME, "Loading librnllama_jni_v8_2_dotprod_i8mm_opencl.so");
         try {
-          System.loadLibrary("rnllama_v8_2_dotprod_i8mm_opencl");
-          loadedLibrary = "rnllama_v8_2_dotprod_i8mm_opencl";
+          System.loadLibrary("rnllama_jni_v8_2_dotprod_i8mm_opencl");
+          loadedLibrary = "rnllama_jni_v8_2_dotprod_i8mm_opencl";
         } catch (UnsatisfiedLinkError e) {
           Log.w(NAME, "OpenCL unavailable (libOpenCL.so not found). Falling back to rnllama_v8_2_dotprod_i8mm.", e);
-          Log.d(NAME, "Loading librnllama_v8_2_dotprod_i8mm.so");
-          System.loadLibrary("rnllama_v8_2_dotprod_i8mm");
-          loadedLibrary = "rnllama_v8_2_dotprod_i8mm";
+          Log.d(NAME, "Loading librnllama_jnki_v8_2_dotprod_i8mm.so");
+          System.loadLibrary("rnllama_jni_v8_2_dotprod_i8mm");
+          loadedLibrary = "rnllama_jni_v8_2_dotprod_i8mm";
         }
       } else if (hasDotProd && hasI8mm) {
-        Log.d(NAME, "Loading librnllama_v8_2_dotprod_i8mm.so");
-        System.loadLibrary("rnllama_v8_2_dotprod_i8mm");
-        loadedLibrary = "rnllama_v8_2_dotprod_i8mm";
+        Log.d(NAME, "Loading librnllama_jni_v8_2_dotprod_i8mm.so");
+        System.loadLibrary("rnllama_jni_v8_2_dotprod_i8mm");
+        loadedLibrary = "rnllama_jni_v8_2_dotprod_i8mm";
       } else if (hasDotProd) {
-        Log.d(NAME, "Loading librnllama_v8_2_dotprod.so");
-        System.loadLibrary("rnllama_v8_2_dotprod");
-        loadedLibrary = "rnllama_v8_2_dotprod";
+        Log.d(NAME, "Loading librnllama_jni_v8_2_dotprod.so");
+        System.loadLibrary("rnllama_jni_v8_2_dotprod");
+        loadedLibrary = "rnllama_jni_v8_2_dotprod";
       } else if (hasI8mm) {
-        Log.d(NAME, "Loading librnllama_v8_2_i8mm.so");
-        System.loadLibrary("rnllama_v8_2_i8mm");
-        loadedLibrary = "rnllama_v8_2_i8mm";
+        Log.d(NAME, "Loading librnllama_jni_v8_2_i8mm.so");
+        System.loadLibrary("rnllama_jni_v8_2_i8mm");
+        loadedLibrary = "rnllama_jni_v8_2_i8mm";
       } else if (hasFp16) {
-        Log.d(NAME, "Loading librnllama_v8_2.so");
-        System.loadLibrary("rnllama_v8_2");
-        loadedLibrary = "rnllama_v8_2";
+        Log.d(NAME, "Loading librnllama_jni_v8_2.so");
+        System.loadLibrary("rnllama_jni_v8_2");
+        loadedLibrary = "rnllama_jni_v8_2";
       } else {
-        Log.d(NAME, "Loading default librnllama_v8.so");
-        System.loadLibrary("rnllama_v8");
-        loadedLibrary = "rnllama_v8";
+        Log.d(NAME, "Loading default librnllama_jni_v8.so");
+        System.loadLibrary("rnllama_jni_v8");
+        loadedLibrary = "rnllama_jni_v8";
       }
     } else if (LlamaContext.isX86_64()) {
-      Log.d(NAME, "Loading librnllama_x86_64.so");
-      System.loadLibrary("rnllama_x86_64");
-      loadedLibrary = "rnllama_x86_64";
+      Log.d(NAME, "Loading librnllama_jni_x86_64.so");
+      System.loadLibrary("rnllama_jni_x86_64");
+      loadedLibrary = "rnllama_jni_x86_64";
     } else {
       Log.d(NAME, "ARM32 is not supported, skipping loading library");
     }
@@ -634,6 +634,7 @@ public class LlamaContext {
     String model,
     String[] skip
   );
+  protected static native String getBackendDevicesInfo();
   protected static native WritableMap initContext(
     ReadableMap params,
     LoadProgressCallback load_progress_callback

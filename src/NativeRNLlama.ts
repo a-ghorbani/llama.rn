@@ -108,14 +108,6 @@ export type NativeCompletionParams = {
   prompt: string
   n_threads?: number
   /**
-   * Number of parallel slots for concurrent requests. Default: 1
-   */
-  n_parallel?: number
-  /**
-   * Batch size for processing. Default: 512
-   */
-  n_batch?: number
-  /**
    * Enable Jinja. Default: true if supported by the model
    */
   jinja?: boolean
@@ -282,6 +274,36 @@ export type NativeCompletionParams = {
   emit_partial_completion: boolean
 }
 
+/**
+ * Parameters for parallel completion requests (queueCompletion).
+ * Extends NativeCompletionParams with parallel-mode specific options.
+ */
+export type NativeParallelCompletionParams = NativeCompletionParams & {
+  /**
+   * File path to load state from before processing.
+   * This allows you to resume from a previously saved completion state.
+   * Use with `save_state_path` to enable conversation continuity across requests.
+   * Example: `'/path/to/state.bin'` or `'file:///path/to/state.bin'`
+   */
+  load_state_path?: string
+
+  /**
+   * File path to save state to after completion.
+   * The state will be saved to this file path when the completion finishes.
+   * You can then pass this path to `load_state_path` in a subsequent request to resume.
+   * Example: `'/path/to/state.bin'` or `'file:///path/to/state.bin'`
+   */
+  save_state_path?: string
+
+  /**
+   * Number of tokens to save when saving state.
+   * If not specified or <= 0, all tokens will be saved.
+   * Use this to limit the size of saved state files.
+   * Example: `512` to save only the last 512 tokens
+   */
+  save_state_size?: number
+}
+
 export type NativeCompletionTokenProbItem = {
   tok_str: string
   prob: number
@@ -293,6 +315,7 @@ export type NativeCompletionTokenProb = {
 }
 
 export type NativeCompletionResultTimings = {
+  cache_n: number
   prompt_n: number
   prompt_ms: number
   prompt_per_token_ms: number
@@ -467,11 +490,20 @@ export type NativeRerankResult = {
   index: number
 }
 
+export type NativeBackendDeviceInfo = {
+  backend: string
+  type: string
+  deviceName: string
+  maxMemorySize: number
+  metadata?: Record<string, any>
+}
+
 export interface Spec extends TurboModule {
   toggleNativeLog(enabled: boolean): Promise<void>
   setContextLimit(limit: number): Promise<void>
 
   modelInfo(path: string, skip?: string[]): Promise<Object>
+  getBackendDevicesInfo(): Promise<string>
   initContext(
     contextId: number,
     params: NativeContextParams,
@@ -522,7 +554,7 @@ export interface Spec extends TurboModule {
   ): Promise<boolean>
   queueCompletion(
     contextId: number,
-    params: NativeCompletionParams,
+    params: NativeParallelCompletionParams,
   ): Promise<{ requestId: number }>
   queueEmbedding(
     contextId: number,

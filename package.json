@@ -1,6 +1,6 @@
 {
   "name": "@pocketpalai/llama.rn",
-  "version": "0.8.0-rc.0-1",
+  "version": "0.8.0-rc.4-0",
   "description": "React Native binding of llama.cpp",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
@@ -16,7 +16,7 @@
     "ios",
     "android",
     "cpp",
-    "expo-plugin",
+    "app.plugin.js",
     "*.podspec",
     "!lib/typescript/example",
     "!ios/build",
@@ -192,7 +192,8 @@
               ]
             }
           ],
-          "react/require-default-props": "off"
+          "react/require-default-props": "off",
+          "no-bitwise": "off"
         }
       }
     ],

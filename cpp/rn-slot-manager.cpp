@@ -78,13 +78,20 @@ int32_t llama_rn_slot_manager::queue_request(
     common_reasoning_format reasoning_format,
     bool thinking_forced_open,
     const std::string& prefill_text,
+    const std::string& load_state_path,
+    const std::string& save_state_path,
+    int32_t save_state_size,
     std::function<void(const completion_token_output&)> on_token,
     std::function<void(llama_rn_slot*)> on_complete
 ) {
     // Generate unique request ID
     int32_t request_id = next_request_id++;
 
-    LOG_INFO("Queuing request %d with %zu prompt tokens", request_id, prompt.size());
+    LOG_INFO("Queuing request %d with %zu prompt tokens (load_state=%s, save_state=%s, save_size=%d)",
+             request_id, prompt.size(),
+             load_state_path.empty() ? "no" : load_state_path.c_str(),
+             save_state_path.empty() ? "no" : save_state_path.c_str(),
+             save_state_size);
 
     // Create queued request
     llama_rn_queued_request request;
@@ -98,6 +105,9 @@ int32_t llama_rn_slot_manager::queue_request(
     request.reasoning_format = reasoning_format;
     request.thinking_forced_open = thinking_forced_open;
     request.prefill_text = prefill_text;
+    request.load_state_path = load_state_path;
+    request.save_state_path = save_state_path;
+    request.save_state_size = save_state_size;
     request.on_token = on_token;
     request.on_complete = on_complete;
 
@@ -292,11 +302,10 @@ llama_rn_slot* llama_rn_slot_manager::get_slot_by_request_id(int32_t request_id)
 void llama_rn_slot_manager::release_slot(llama_rn_slot* slot) {
     LOG_VERBOSE("Releasing slot %d", slot->id);
 
-    // Save cache tokens for potential reuse
-    slot->cache_tokens = slot->prompt_tokens;
+    // Update last used timestamp for LRU tracking
     slot->t_last_used = lm_ggml_time_us();
 
-    // Reset slot
+    // Reset slot (cache_tokens is preserved by reset() for potential reuse)
     slot->reset();
 }
 
@@ -383,10 +392,8 @@ void llama_rn_slot_manager::process_pending_queue() {
         }
 
         // Assign request to slot
-        LOG_INFO("Assigning request %d to slot %d (task=%d)", request.request_id, slot->id, request.task_type);
         slot->request_id = request.request_id;
         slot->task_type = request.task_type;
-        slot->t_start_process = lm_ggml_time_us();
         slot->is_interrupted = false;
 
         // Reset callbacks from previous usage
@@ -405,6 +412,32 @@ void llama_rn_slot_manager::process_pending_queue() {
             case SLOT_TASK_TYPE_COMPLETION: {
                 slot->ctx_sampling = common_sampler_init(parent_ctx->model, request.params.sampling);
 
+                // Assign state parameters
+                slot->load_state_path = request.load_state_path;
+                slot->save_state_path = request.save_state_path;
+                slot->save_state_size = request.save_state_size;
+
+                // Load state if provided
+                if (!slot->load_state_path.empty()) {
+                    if (!slot->load_state()) {
+                        LOG_ERROR("Failed to load state for slot %d, request %d",
+                                  slot->id, request.request_id);
+                        // Mark slot as done with error
+                        slot->state = SLOT_STATE_DONE;
+                        slot->incomplete = true;
+                        slot->error_message = "Failed to load state from: " + slot->load_state_path;
+                        if (request.on_complete) {
+                            request.on_complete(slot);
+                        }
+                        queue_requests.pop_front();
+                        continue;
+                    }
+                }
+
+                // Start timing AFTER state loading completes
+                slot->t_start_process = lm_ggml_time_us();
+
+                // Always load prompt - it will detect and preserve state if appropriate
                 bool has_media = !request.media_paths.empty();
                 if (has_media && parent_ctx->isMultimodalEnabled()) {
                     LOG_INFO("Storing %zu media paths for deferred processing in slot %d",
@@ -433,6 +466,9 @@ void llama_rn_slot_manager::process_pending_queue() {
             }
 
             case SLOT_TASK_TYPE_EMBEDDING: {
+                // Start timing (no state loading for embeddings)
+                slot->t_start_process = lm_ggml_time_us();
+
                 slot->media_paths.clear();
                 slot->prompt_text.clear();
                 slot->media_processed = true;
@@ -446,6 +482,9 @@ void llama_rn_slot_manager::process_pending_queue() {
             }
 
             case SLOT_TASK_TYPE_RERANK: {
+                // Start timing (memory clear is part of the task, not overhead)
+                slot->t_start_process = lm_ggml_time_us();
+
                 if (parent_ctx && parent_ctx->ctx) {
                     llama_memory_clear(llama_get_memory(parent_ctx->ctx), false);
                 }
@@ -570,7 +609,12 @@ void llama_rn_slot_manager::build_batch() {
 
                     // Transition to GENERATING state immediately since all prompt tokens are processed
                     slot.state = SLOT_STATE_GENERATING;
-                    slot.t_start_generation = lm_ggml_time_us();
+
+                    // Mark that prompt processing just finished - timing will be calculated after decode
+                    // Note: for media processing, processMedia() already decoded everything, so timing
+                    // calculation will happen immediately after this in the main loop
+                    slot.prompt_processing_finished = true;
+                    slot.n_prompt_tokens_processed = slot.num_prompt_tokens - slot.n_prompt_tokens_cache;
 
                     // Set i_batch to -1 to indicate logits from media processing are ready to sample
                     // In sample_and_callback(), batch index -1 will be handled specially
@@ -622,7 +666,10 @@ void llama_rn_slot_manager::build_batch() {
             // If we've processed all prompt tokens, transition based on task type
             if (slot.n_past >= (llama_pos)slot.num_prompt_tokens) {
                 slot.state = SLOT_STATE_GENERATING;
-                slot.t_start_generation = lm_ggml_time_us();
+
+                // Mark that prompt processing just finished - timing will be calculated after decode
+                slot.prompt_processing_finished = true;
+                slot.n_prompt_tokens_processed = slot.num_prompt_tokens - slot.n_prompt_tokens_cache;
 
                 if (slot.task_type == SLOT_TASK_TYPE_COMPLETION) {
                     LOG_INFO("Slot %d: Transitioned to GENERATING state", slot.id);
@@ -674,6 +721,10 @@ bool llama_rn_slot_manager::process_batch() {
 
         return false;
     }
+
+    // Synchronize to ensure GPU work completes before timing measurements
+    // This is critical for accurate performance metrics when using Metal/GPU
+    llama_synchronize(parent_ctx->ctx);
 
     LOG_VERBOSE("Batch processed successfully");
     return true;
@@ -739,6 +790,11 @@ void llama_rn_slot_manager::sample_and_callback() {
                     slot.state = SLOT_STATE_DONE;
                     LOG_INFO("Slot %d: Stopped on EOS token", slot.id);
 
+                    // Save state if path is provided
+                    if (!slot.save_state_path.empty()) {
+                        slot.save_state();
+                    }
+
                     if (slot.on_complete_callback) {
                         slot.on_complete_callback(&slot);
                     }
@@ -747,6 +803,10 @@ void llama_rn_slot_manager::sample_and_callback() {
 
                 std::string token_text = common_token_to_piece(parent_ctx->ctx, new_token_id);
                 slot.generated_text += token_text;
+
+                // Update token generation timing
+                const int64_t t_current = lm_ggml_time_us();
+                slot.t_token_generation = (t_current - slot.t_start_generation) / 1e6;
 
                 completion_token_output token_output;
                 token_output.tok = new_token_id;
@@ -763,6 +823,10 @@ void llama_rn_slot_manager::sample_and_callback() {
 
                 slot.generated_tokens.push_back(new_token_id);
                 slot.n_decoded++;
+
+                // Update cache_tokens to keep track of all processed tokens
+                // This is needed for state saving
+                slot.cache_tokens.push_back(new_token_id);
 
                 if (slot.on_token_callback) {
                     slot.on_token_callback(token_output);
@@ -807,6 +871,12 @@ void llama_rn_slot_manager::sample_and_callback() {
 
                 if (should_stop) {
                     slot.state = SLOT_STATE_DONE;
+
+                    // Save state if path is provided
+                    if (!slot.save_state_path.empty()) {
+                        slot.save_state();
+                    }
+
                     if (slot.on_complete_callback) {
                         slot.on_complete_callback(&slot);
                     }
@@ -905,18 +975,21 @@ void llama_rn_slot_manager::release_completed_slots() {
 
 // Main processing loop
 void llama_rn_slot_manager::update_slots() {
-    // Acquire mutex lock for thread-safe access
-    std::lock_guard<std::mutex> lock(slots_mutex);
+    // Step 1: Process pending queue (with mutex)
+    {
+        std::lock_guard<std::mutex> lock(slots_mutex);
+        process_pending_queue();
+    }
 
-    // Step 1: Process pending queue
-    process_pending_queue();
-
-    // Step 2: Check if any slots are active
+    // Step 2: Check if any slots are active (with mutex)
     bool has_active = false;
-    for (const auto& slot : slots) {
-        if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_GENERATING) {
-            has_active = true;
-            break;
+    {
+        std::lock_guard<std::mutex> lock(slots_mutex);
+        for (const auto& slot : slots) {
+            if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_GENERATING) {
+                has_active = true;
+                break;
+            }
         }
     }
 
@@ -925,15 +998,19 @@ void llama_rn_slot_manager::update_slots() {
         return;
     }
 
-    // Step 3: Build batch from all active slots
-    build_batch();
+    // Step 3: Build batch from all active slots (with mutex)
+    {
+        std::lock_guard<std::mutex> lock(slots_mutex);
+        build_batch();
+    }
 
-    // Step 4: Process batch if we have tokens
+    // Step 4: Process batch if we have tokens (NO mutex - llama_decode is thread-safe)
     if (batch.n_tokens > 0) {
         bool success = process_batch();
         if (!success) {
             LOG_ERROR("Batch processing failed");
-            // Mark all active slots as done with error
+            // Mark all active slots as done with error (with mutex)
+            std::lock_guard<std::mutex> lock(slots_mutex);
             for (auto& slot : slots) {
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_GENERATING) {
                     slot.state = SLOT_STATE_DONE;
@@ -945,13 +1022,42 @@ void llama_rn_slot_manager::update_slots() {
             }
             return;
         }
+
+        // Step 4.5: Calculate timing for slots that just finished prompt processing
+        // This must happen AFTER batch has been decoded
+        {
+            std::lock_guard<std::mutex> lock(slots_mutex);
+            const int64_t t_now = lm_ggml_time_us();
+            for (auto& slot : slots) {
+                if (slot.prompt_processing_finished) {
+                    slot.t_start_generation = t_now;
+                    slot.t_prompt_processing = (slot.t_start_generation - slot.t_start_process) / 1e6;
+                    slot.prompt_processing_finished = false;  // Clear the flag
+
+                    LOG_VERBOSE("Slot %d: Prompt processing complete, time=%.3fs, tokens=%d (cached=%d)",
+                               slot.id, slot.t_prompt_processing, slot.n_prompt_tokens_processed, slot.n_prompt_tokens_cache);
+                }
+            }
+        }
     }
 
-    // Step 5: Sample tokens and invoke callbacks for GENERATING slots
-    sample_and_callback();
+    // Step 5: Sample tokens and invoke callbacks for GENERATING slots (with mutex)
+    {
+        std::lock_guard<std::mutex> lock(slots_mutex);
+        sample_and_callback();
+    }
 
-    // Step 6: Release completed slots
-    release_completed_slots();
+    // Step 6: Release completed slots (with mutex)
+    {
+        std::lock_guard<std::mutex> lock(slots_mutex);
+        release_completed_slots();
+    }
+
+    // Step 7: Process pending queue again - assign requests to newly freed slots (with mutex)
+    {
+        std::lock_guard<std::mutex> lock(slots_mutex);
+        process_pending_queue();
+    }
 }
 
 // Start background processing loop
