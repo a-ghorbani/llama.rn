@@ -1,6 +1,6 @@
 {
   "name": "@pocketpalai/llama.rn",
-  "version": "0.8.0-0",
+  "version": "0.8.1-0",
   "description": "React Native binding of llama.cpp",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
