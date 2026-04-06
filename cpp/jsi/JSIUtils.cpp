@@ -82,7 +82,7 @@ namespace rnllama_jsi {
                                 return;
                             }
                             try {
-                                callInvoker->invokeAsync([resolve, resultGenerator, runtimePtr, contextId, shouldTrack]() {
+                                callInvoker->invokeAsync([resolve, reject, resultGenerator, runtimePtr, contextId, shouldTrack]() {
                                     if (TaskManager::getInstance().isShuttingDown()) {
                                         TaskFinishGuard guard(contextId, shouldTrack);
                                         return;
@@ -90,7 +90,13 @@ namespace rnllama_jsi {
                                     // Finish task AFTER the JS callback completes (when resultGenerator runs)
                                     TaskFinishGuard guard(contextId, shouldTrack);
                                     auto& rt = *runtimePtr;
-                                    resolve->call(rt, resultGenerator(rt));
+                                    try {
+                                        resolve->call(rt, resultGenerator(rt));
+                                    } catch (const std::exception& e) {
+                                        reject->call(rt, jsi::String::createFromUtf8(rt, e.what()));
+                                    } catch (...) {
+                                        reject->call(rt, jsi::String::createFromUtf8(rt, "Unknown error"));
+                                    }
                                 });
                                 invokeScheduled = true;
                             } catch (...) {
