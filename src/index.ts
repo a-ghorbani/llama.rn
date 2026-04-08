@@ -936,12 +936,7 @@ export class LlamaContext {
     loraList: Array<{ path: string; scaled?: number }>,
   ): Promise<void> {
     const { llamaApplyLoraAdapters } = getJsi()
-    let loraAdapters: Array<{ path: string; scaled?: number }> = []
-    if (loraList)
-      loraAdapters = loraList.map((l) => ({
-        path: l.path.replace(/file:\/\//, ''),
-        scaled: l.scaled,
-      }))
+    const loraAdapters = normalizeLoraAdapters({ loraList })
     return llamaApplyLoraAdapters(this.id, loraAdapters)
   }
 
@@ -1127,6 +1122,48 @@ const poolTypeMap = {
   rank: 4,
 }
 
+type LoraAdapterInput = {
+  path: string
+  scaled?: number
+}
+
+const stripFilePrefix = (path: string) => path.replace(/^file:\/\//, '')
+
+function normalizeLoraAdapters({
+  lora,
+  loraScaled,
+  loraList,
+}: {
+  lora?: string
+  loraScaled?: number
+  loraList?: Array<LoraAdapterInput>
+}): Array<LoraAdapterInput> {
+  const adapters = new Map<string, LoraAdapterInput>()
+
+  if (lora) {
+    const normalizedPath = stripFilePrefix(lora)
+    if (normalizedPath) {
+      adapters.set(normalizedPath, {
+        path: normalizedPath,
+        scaled: loraScaled,
+      })
+    }
+  }
+
+  if (loraList) {
+    loraList.forEach((adapter) => {
+      const normalizedPath = stripFilePrefix(adapter.path)
+      if (!normalizedPath) return
+      adapters.set(normalizedPath, {
+        path: normalizedPath,
+        scaled: adapter.scaled,
+      })
+    })
+  }
+
+  return Array.from(adapters.values())
+}
+
 export async function getBackendDevicesInfo(): Promise<
   Array<NativeBackendDeviceInfo>
 > {
@@ -1150,6 +1187,7 @@ export async function initLlama(
     is_model_asset: isModelAsset,
     pooling_type: poolingType,
     lora,
+    lora_scaled: loraScaled,
     lora_list: loraList,
     devices,
     ...rest
@@ -1161,15 +1199,11 @@ export async function initLlama(
   let path = model
   if (path.startsWith('file://')) path = path.slice(7)
 
-  let loraPath = lora
-  if (loraPath?.startsWith('file://')) loraPath = loraPath.slice(7)
-
-  let loraAdapters: Array<{ path: string; scaled?: number }> = []
-  if (loraList)
-    loraAdapters = loraList.map((l) => ({
-      path: l.path.replace(/file:\/\//, ''),
-      scaled: l.scaled,
-    }))
+  const loraAdapters = normalizeLoraAdapters({
+    lora,
+    loraScaled,
+    loraList,
+  })
 
   const contextId = contextIdCounter + contextIdRandom()
   contextIdCounter += 1
@@ -1237,8 +1271,7 @@ export async function initLlama(
       is_model_asset: !!isModelAsset,
       use_progress_callback: !!progressCallback,
       pooling_type: poolType,
-      lora: loraPath,
-      lora_list: loraAdapters,
+      ...(loraAdapters.length > 0 ? { lora_list: loraAdapters } : {}),
       devices: filteredDevs.length > 0 ? filteredDevs : undefined,
       ...rest,
     },

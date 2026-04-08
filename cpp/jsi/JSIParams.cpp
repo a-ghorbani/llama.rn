@@ -212,15 +212,22 @@ namespace rnllama_jsi {
         }
 
         if (params.hasProperty(runtime, "lora_list")) {
-            jsi::Array loraList = params.getProperty(runtime, "lora_list").asObject(runtime).asArray(runtime);
-            for (size_t i = 0; i < loraList.size(runtime); i++) {
-                jsi::Object item = loraList.getValueAtIndex(runtime, i).asObject(runtime);
-                std::string path = getPropertyAsString(runtime, item, "path");
-                if (!path.empty()) {
-                    common_adapter_lora_info la;
-                    la.path = path;
-                    la.scale = getPropertyAsFloat(runtime, item, "scaled", 1.0f);
-                    cparams.lora_adapters.push_back(la);
+            jsi::Value loraListValue = params.getProperty(runtime, "lora_list");
+            if (loraListValue.isObject() && loraListValue.asObject(runtime).isArray(runtime)) {
+                jsi::Array loraList = loraListValue.asObject(runtime).asArray(runtime);
+                for (size_t i = 0; i < loraList.size(runtime); i++) {
+                    jsi::Value itemValue = loraList.getValueAtIndex(runtime, i);
+                    if (!itemValue.isObject()) {
+                        continue;
+                    }
+                    jsi::Object item = itemValue.asObject(runtime);
+                    std::string path = getPropertyAsString(runtime, item, "path");
+                    if (!path.empty()) {
+                        common_adapter_lora_info la;
+                        la.path = path;
+                        la.scale = getPropertyAsFloat(runtime, item, "scaled", 1.0f);
+                        cparams.lora_adapters.push_back(la);
+                    }
                 }
             }
         }
