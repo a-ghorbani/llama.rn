@@ -1305,6 +1305,22 @@ llama_rn_parallel_status llama_rn_slot_manager::get_status() {
     return status;
 }
 
+bool llama_rn_slot_manager::has_pending_work() {
+    std::lock_guard<std::mutex> lock(slots_mutex);
+
+    if (!queue_requests.empty()) {
+        return true;
+    }
+
+    for (const auto& slot : slots) {
+        if (slot.state != SLOT_STATE_IDLE && slot.state != SLOT_STATE_DONE) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // Notify all subscribers of status change
 void llama_rn_slot_manager::notify_status_change() {
     // Get status snapshot first (acquires slots_mutex inside)
