@@ -172,6 +172,24 @@ namespace rnllama_jsi {
         return g_llamaContexts.size() >= static_cast<size_t>(limit);
     }
 
+    static bool isContextBusy(rnllama::llama_rn_context* ctx) {
+        if (ctx == nullptr) {
+            return false;
+        }
+
+        if (ctx->completion && ctx->completion->is_predicting) {
+            return true;
+        }
+
+        return ctx->slot_manager && ctx->slot_manager->has_pending_work();
+    }
+
+    static void throwIfContextBusy(rnllama::llama_rn_context* ctx) {
+        if (isContextBusy(ctx)) {
+            throw std::runtime_error("Context is busy");
+        }
+    }
+
     static void ensureBackendInitialized() {
         std::call_once(backend_init_once, []() {
             llama_backend_init();
@@ -648,9 +666,7 @@ namespace rnllama_jsi {
 
                 return createPromiseTask(runtime, callInvoker, [contextId, path]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
-                    if (ctx->completion && ctx->completion->is_predicting) {
-                         throw std::runtime_error("Context is busy");
-                    }
+                    throwIfContextBusy(ctx);
                     return [contextId, path](jsi::Runtime& rt) {
                         long ctxPtr = g_llamaContexts.get(contextId);
                         if (!ctxPtr) {
@@ -674,9 +690,7 @@ namespace rnllama_jsi {
 
                 return createPromiseTask(runtime, callInvoker, [contextId, path, size]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
-                    if (ctx->completion && ctx->completion->is_predicting) {
-                         throw std::runtime_error("Context is busy");
-                    }
+                    throwIfContextBusy(ctx);
                     int tokens_saved = rnllama_jsi::saveSession(ctx, path, size);
                     return [tokens_saved](jsi::Runtime& rt) {
                         return jsi::Value(tokens_saved);
@@ -871,7 +885,7 @@ namespace rnllama_jsi {
 
                     if (!ctx->completion) throw std::runtime_error("Completion not initialized");
                     if (ctx->params.embedding != true) throw std::runtime_error("Embedding is not enabled");
-                    if (ctx->completion->is_predicting) throw std::runtime_error("Context is predicting");
+                    throwIfContextBusy(ctx);
 
                     common_params embdParams = ctx->params;
                     embdParams.embedding = true;
@@ -914,7 +928,7 @@ namespace rnllama_jsi {
 
                     if (!ctx->completion) throw std::runtime_error("Completion not initialized");
                     if (ctx->params.embedding != true) throw std::runtime_error("Embedding is not enabled");
-                    if (ctx->completion->is_predicting) throw std::runtime_error("Context is predicting");
+                    throwIfContextBusy(ctx);
 
                     std::vector<float> scores = ctx->completion->rerank(query, documents);
 
@@ -972,9 +986,7 @@ namespace rnllama_jsi {
                 bool emitPartial = getPropertyAsBool(runtime, params, "emit_partial_completion", false);
 
                 auto ctx = getContextOrThrow(contextId);
-                if (ctx->completion && ctx->completion->is_predicting) {
-                     throw std::runtime_error("Context is busy");
-                }
+                throwIfContextBusy(ctx);
                 ctx->completion->rewind();
 
                 parseCompletionParams(runtime, params, ctx);
@@ -1014,6 +1026,7 @@ namespace rnllama_jsi {
                     if (ctx->completion == nullptr) {
                         throw std::runtime_error("Completion not initialized");
                     }
+                    throwIfContextBusy(ctx);
 
                     if (!guide_tokens.empty() && ctx->tts_wrapper != nullptr) {
                         ctx->params.vocoder.use_guide_tokens = true;
@@ -1810,9 +1823,7 @@ namespace rnllama_jsi {
 
                 return createPromiseTask(runtime, callInvoker, [contextId, lora_adapters]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
-                    if (ctx->completion && ctx->completion->is_predicting) {
-                         throw std::runtime_error("Context is busy");
-                    }
+                    throwIfContextBusy(ctx);
                     ctx->applyLoraAdapters(lora_adapters);
                     return [](jsi::Runtime& rt) { return jsi::Value::undefined(); };
                 }, contextId);
@@ -1827,9 +1838,7 @@ namespace rnllama_jsi {
                 int contextId = (int)arguments[0].asNumber();
                 return createPromiseTask(runtime, callInvoker, [contextId]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
-                    if (ctx->completion && ctx->completion->is_predicting) {
-                         throw std::runtime_error("Context is busy");
-                    }
+                    throwIfContextBusy(ctx);
                     ctx->removeLoraAdapters();
                     return [](jsi::Runtime& rt) { return jsi::Value::undefined(); };
                 }, contextId);
@@ -1874,9 +1883,7 @@ namespace rnllama_jsi {
 
                 return createPromiseTask(runtime, callInvoker, [contextId, path, use_gpu, image_min_tokens, image_max_tokens]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
-                    if (ctx->completion && ctx->completion->is_predicting) {
-                         throw std::runtime_error("Context is busy");
-                    }
+                    throwIfContextBusy(ctx);
                     bool result = ctx->initMultimodal(path, use_gpu, image_min_tokens, image_max_tokens);
                     return [result](jsi::Runtime& rt) { return jsi::Value(result); };
                 }, contextId);
@@ -1926,6 +1933,7 @@ namespace rnllama_jsi {
                 int contextId = (int)arguments[0].asNumber();
                 return createPromiseTask(runtime, callInvoker, [contextId]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
+                    throwIfContextBusy(ctx);
                     ctx->releaseMultimodal();
                     return [](jsi::Runtime& rt) { return jsi::Value::undefined(); };
                 }, contextId);
@@ -1945,9 +1953,7 @@ namespace rnllama_jsi {
 
                 return createPromiseTask(runtime, callInvoker, [contextId, path, n_batch]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
-                    if (ctx->completion && ctx->completion->is_predicting) {
-                         throw std::runtime_error("Context is busy");
-                    }
+                    throwIfContextBusy(ctx);
                     bool result = ctx->initVocoder(path, n_batch);
                     return [result](jsi::Runtime& rt) { return jsi::Value(result); };
                 }, contextId);
@@ -2066,9 +2072,7 @@ namespace rnllama_jsi {
                 bool clearData = count > 1 && arguments[1].isBool() ? arguments[1].asBool() : false;
                 return createPromiseTask(runtime, callInvoker, [contextId, clearData]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
-                    if (ctx->completion && ctx->completion->is_predicting) {
-                        throw std::runtime_error("Context is busy");
-                    }
+                    throwIfContextBusy(ctx);
                     ctx->clearCache(clearData);
                     return [](jsi::Runtime& rt) { return jsi::Value::undefined(); };
                 }, contextId);
@@ -2083,6 +2087,7 @@ namespace rnllama_jsi {
                 int contextId = (int)arguments[0].asNumber();
                 return createPromiseTask(runtime, callInvoker, [contextId]() -> PromiseResultGenerator {
                     auto ctx = getContextOrThrow(contextId);
+                    throwIfContextBusy(ctx);
                     ctx->releaseVocoder();
                     return [](jsi::Runtime& rt) { return jsi::Value::undefined(); };
                 }, contextId);
