@@ -46,10 +46,25 @@ function readMarker(markerPath) {
   return fs.readFileSync(absolutePath, 'utf8').trim()
 }
 
-function isArtifactInstalled(artifact) {
+function getMarkerPaths(artifact) {
+  return [
+    ...new Set(
+      [artifact.markerPath, artifact.legacyMarkerPath].filter(
+        (markerPath) => typeof markerPath === 'string' && markerPath.length > 0,
+      ),
+    ),
+  ]
+}
+
+function resolveInstalledMarkerPath(artifact) {
+  if (!targetExists(artifact.relativePath)) {
+    return null
+  }
+
   return (
-    targetExists(artifact.relativePath) &&
-    readMarker(artifact.markerPath) === artifact.sha256
+    getMarkerPaths(artifact).find(
+      (markerPath) => readMarker(markerPath) === artifact.sha256,
+    ) || null
   )
 }
 
@@ -72,6 +87,16 @@ function removeIfExists(relativePath) {
     force: true,
     recursive: true,
   })
+}
+
+function reconcileInstalledMarker(artifact) {
+  // Keep the checksum marker inside the cached artifact path, but continue
+  // accepting the legacy sidecar marker until existing caches have rotated.
+  writeMarker(artifact.markerPath, artifact.sha256)
+
+  getMarkerPaths(artifact)
+    .filter((markerPath) => markerPath !== artifact.markerPath)
+    .forEach((markerPath) => removeIfExists(markerPath))
 }
 
 function getTransport(url) {
@@ -173,7 +198,7 @@ async function installArtifact(artifact) {
     }
 
     removeIfExists(artifact.relativePath)
-    removeIfExists(artifact.markerPath)
+    getMarkerPaths(artifact).forEach((markerPath) => removeIfExists(markerPath))
     extractArchive(archivePath)
 
     if (!targetExists(artifact.relativePath)) {
@@ -214,7 +239,10 @@ async function main() {
   }
 
   const artifactsToInstall = artifacts.filter((artifact) => {
-    if (!force && isArtifactInstalled(artifact)) {
+    const installedMarkerPath = force ? null : resolveInstalledMarkerPath(artifact)
+
+    if (installedMarkerPath) {
+      reconcileInstalledMarker(artifact)
       console.log(`llama.rn: using cached ${artifact.relativePath}`)
       return false
     }
