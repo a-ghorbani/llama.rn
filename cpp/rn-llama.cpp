@@ -31,6 +31,14 @@ void populate_lora_metadata(common_adapter_lora_info &la) {
     la.prompt_prefix = buf;
 }
 
+void clear_init_lora_ownership(common_init_result_ptr &llama_init) {
+    if (llama_init != nullptr) {
+        // common_init_from_params() owns adapters loaded during init. Once runtime
+        // adapter state changes, those original handles should be released too.
+        llama_init->lora().clear();
+    }
+}
+
 } // namespace
 
 std::string get_backend_devices_info() {
@@ -402,8 +410,9 @@ void llama_rn_context::applyLoraAdapters(std::vector<common_adapter_lora_info> l
     }
 
     common_set_adapter_lora(ctx, lora);
-    owned_lora = std::move(loaded_adapters);
     this->lora = std::move(lora);
+    clear_init_lora_ownership(llama_init);
+    owned_lora = std::move(loaded_adapters);
 }
 
 void llama_rn_context::removeLoraAdapters() {
@@ -413,6 +422,7 @@ void llama_rn_context::removeLoraAdapters() {
     }
 
     this->lora.clear();
+    clear_init_lora_ownership(llama_init);
     owned_lora.clear();
 }
 
