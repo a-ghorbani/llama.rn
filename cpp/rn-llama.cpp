@@ -241,13 +241,20 @@ bool llama_rn_context::loadModel(common_params &params_)
     }
 
     llama_init = common_init_from_params(params);
-    model = llama_init->model();
-    ctx = llama_init->context();
-    if (model == nullptr)
-    {
-        LOG_ERROR("unable to load model: %s", params_.model.path.c_str());
+    model = llama_init != nullptr ? llama_init->model() : nullptr;
+    ctx = llama_init != nullptr ? llama_init->context() : nullptr;
+
+    // common_init_from_params() can fail after loading the model but before
+    // constructing the context, so both pointers must be validated here.
+    if (model == nullptr || ctx == nullptr) {
+        if (model == nullptr) {
+            LOG_ERROR("unable to load model: %s", params_.model.path.c_str());
+        } else {
+            LOG_ERROR("unable to initialize context for model: %s", params_.model.path.c_str());
+        }
         return false;
     }
+
     templates = common_chat_templates_init(model, params.chat_template);
     n_ctx = llama_n_ctx(ctx);
 

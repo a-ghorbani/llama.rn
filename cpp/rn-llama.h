@@ -62,7 +62,7 @@ struct llama_rn_context {
     common_init_result_ptr llama_init;
     llama_context *ctx = nullptr;
     common_chat_templates_ptr templates;
-    int n_ctx;
+    int n_ctx = 0;
 
     // Completion context (DEPRECATED: Use slot_manager for parallel decoding)
     llama_rn_context_completion *completion = nullptr;
