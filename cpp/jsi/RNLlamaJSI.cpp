@@ -374,6 +374,60 @@ namespace rnllama_jsi {
         return selected;
     }
 
+    static bool isGpuDeviceType(enum lm_ggml_backend_dev_type type) {
+        return type == LM_GGML_BACKEND_DEVICE_TYPE_GPU || type == LM_GGML_BACKEND_DEVICE_TYPE_IGPU;
+    }
+
+    static bool hasGpuBackendDevice() {
+        const size_t devCount = lm_ggml_backend_dev_count();
+        for (size_t i = 0; i < devCount; ++i) {
+            auto dev = lm_ggml_backend_dev_get(i);
+            if (isGpuDeviceType(lm_ggml_backend_dev_type(dev))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static void configureBackendDevices(
+        common_params& cparams,
+        const std::vector<std::string>& requestedDevices,
+        bool devicesProvided,
+        bool skipGpuDevices,
+        bool& anyGpuAvailable
+    ) {
+        anyGpuAvailable = false;
+        std::vector<lm_ggml_backend_dev_t> overrideDevices;
+
+        if (devicesProvided) {
+            overrideDevices = buildDeviceOverrides(requestedDevices, skipGpuDevices, anyGpuAvailable);
+            if (!overrideDevices.empty()) {
+                cparams.devices = overrideDevices;
+            }
+        }
+
+        if (overrideDevices.empty() && !skipGpuDevices) {
+#if defined(__ANDROID__)
+            auto defaultDevices = getFilteredDefaultDevices();
+            if (!defaultDevices.empty()) {
+                cparams.devices = defaultDevices;
+                for (auto dev : defaultDevices) {
+                    if (dev == nullptr) continue;
+                    if (isGpuDeviceType(lm_ggml_backend_dev_type(dev))) {
+                        anyGpuAvailable = true;
+                        break;
+                    }
+                }
+            }
+#endif
+        }
+
+        // Track backend availability when no explicit override was applied.
+        if (overrideDevices.empty() && !anyGpuAvailable) {
+            anyGpuAvailable = hasGpuBackendDevice();
+        }
+    }
+
     void addContext(int contextId, long contextPtr) {
         g_llamaContexts.add(contextId, contextPtr);
     }
@@ -420,8 +474,6 @@ namespace rnllama_jsi {
                     useProgressCallback = false;
                 }
 
-                ensureBackendInitialized();
-
                 common_params cparams;
                 parseCommonParams(runtime, params, cparams);
 
@@ -435,15 +487,6 @@ namespace rnllama_jsi {
                 if (skipGpuDevices) {
                     cparams.n_gpu_layers = 0;
                 }
-
-#if defined(__APPLE__)
-                auto metalAvailability = getMetalAvailability(skipGpuDevices);
-                std::string appleGpuReason = metalAvailability.available ? "" : metalAvailability.reason;
-                if (!metalAvailability.available && !skipGpuDevices) {
-                    skipGpuDevices = true;
-                    cparams.n_gpu_layers = 0;
-                }
-#endif
 
                 std::vector<std::string> requestedDevices;
                 bool devicesProvided = false;
@@ -459,52 +502,39 @@ namespace rnllama_jsi {
                         }
                     }
                 }
-                bool anyGpuAvailable = false;
-                std::vector<lm_ggml_backend_dev_t> overrideDevices;
-                if (devicesProvided) {
-                    overrideDevices = buildDeviceOverrides(requestedDevices, skipGpuDevices, anyGpuAvailable);
-                    if (!overrideDevices.empty()) {
-                        cparams.devices = overrideDevices;
-                    }
-                }
-                if (overrideDevices.empty() && !skipGpuDevices) {
-#if defined(__ANDROID__)
-                    auto defaultDevices = getFilteredDefaultDevices();
-                    if (!defaultDevices.empty()) {
-                        cparams.devices = defaultDevices;
-                        for (auto dev : defaultDevices) {
-                            if (dev == nullptr) continue;
-                            auto type = lm_ggml_backend_dev_type(dev);
-                            if (type == LM_GGML_BACKEND_DEVICE_TYPE_GPU || type == LM_GGML_BACKEND_DEVICE_TYPE_IGPU) {
-                                anyGpuAvailable = true;
-                                break;
-                            }
-                        }
-                    }
-#endif
-                }
 
-                // Track backend availability when no explicit override was applied
-                if (overrideDevices.empty() && anyGpuAvailable == false) {
-                    const size_t devCount = lm_ggml_backend_dev_count();
-                    for (size_t i = 0; i < devCount; ++i) {
-                        auto dev = lm_ggml_backend_dev_get(i);
-                        auto type = lm_ggml_backend_dev_type(dev);
-                        if (type == LM_GGML_BACKEND_DEVICE_TYPE_GPU || type == LM_GGML_BACKEND_DEVICE_TYPE_IGPU) {
-                            anyGpuAvailable = true;
-                            break;
-                        }
-                    }
-                }
-
-                return createPromiseTask(runtime, callInvoker, [contextId, cparams, skipGpuDevices, anyGpuAvailable, useProgressCallback, progressData
-#if defined(__APPLE__)
-                    , appleGpuReason
-#endif
+                return createPromiseTask(runtime, callInvoker, [
+                    contextId,
+                    cparams,
+                    skipGpuDevices,
+                    requestedDevices,
+                    devicesProvided,
+                    useProgressCallback,
+                    progressData
                 ]() mutable -> PromiseResultGenerator {
                     if (isContextLimitReached()) {
                         throw std::runtime_error("Context limit reached");
                     }
+
+                    ensureBackendInitialized();
+
+#if defined(__APPLE__)
+                    auto metalAvailability = getMetalAvailability(skipGpuDevices);
+                    std::string appleGpuReason = metalAvailability.available ? "" : metalAvailability.reason;
+                    if (!metalAvailability.available && !skipGpuDevices) {
+                        skipGpuDevices = true;
+                        cparams.n_gpu_layers = 0;
+                    }
+#endif
+
+                    bool anyGpuAvailable = false;
+                    configureBackendDevices(
+                        cparams,
+                        requestedDevices,
+                        devicesProvided,
+                        skipGpuDevices,
+                        anyGpuAvailable
+                    );
 
                     if (useProgressCallback && progressData && progressData->callback) {
                         cparams.progress_callback = [](float progress, void * user_data) {
@@ -558,8 +588,7 @@ namespace rnllama_jsi {
                                  if (used_name != nullptr) {
                                      usedDevices.push_back(used_name);
                                  }
-                                 auto devType = lm_ggml_backend_dev_type(dev);
-                                 if (devType == LM_GGML_BACKEND_DEVICE_TYPE_GPU || devType == LM_GGML_BACKEND_DEVICE_TYPE_IGPU) {
+                                 if (isGpuDeviceType(lm_ggml_backend_dev_type(dev))) {
                                      gpuEnabled = true;
                                  }
                              }
