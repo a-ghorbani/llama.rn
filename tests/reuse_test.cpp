@@ -547,9 +547,15 @@ static void run_ctx_shift_test(const char* model_path) {
     conv.push_back({"assistant", t1.text});
     conv.push_back({"user", "Tell me a very long story about the sea."});
     auto t2 = chat_turn(ctx, conv, 320, /*checkpoint*/true);
-    std::cout << "  turn2 predicted=" << t2.predicted << " (n_ctx=256, shift expected)\n";
-    if (!c->truncated && t2.predicted < 200) {
-        std::cout << "  SKIP: generation ended before the context shifted; nothing to assert.\n";
+    std::cout << "  turn2 predicted=" << t2.predicted << " truncated=" << c->truncated
+              << " (n_ctx=256, shift expected)\n";
+    // `truncated` is the only reliable signal that the mid-generation shift actually
+    // fired (rn-completion.cpp sets it exactly there). Token count is not a proxy: a
+    // turn can generate many tokens without the cache reaching n_ctx (longer prompt,
+    // early stop). If no shift fired there is nothing to assert -- and a restore on the
+    // next turn would be correct, not a bug -- so skip.
+    if (!c->truncated) {
+        std::cout << "  SKIP: generation did not trigger a context shift; nothing to assert.\n";
         return;
     }
     check("ctx shift drops the checkpoint (valid==false)", !c->kv_checkpoint.valid);

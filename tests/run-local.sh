@@ -37,7 +37,11 @@ for m in models/*.gguf; do
     base="$(basename "$m")"
     case "$base" in mmproj-*) continue ;; esac
     if [ "${#FILTERS[@]}" -gt 0 ]; then
-        match=0; for f in "${FILTERS[@]}"; do [[ "$base" == *"$f"* ]] && match=1; done
+        match=0; lc_base="$(echo "$base" | tr '[:upper:]' '[:lower:]')"
+        for f in "${FILTERS[@]}"; do
+            lc_f="$(echo "$f" | tr '[:upper:]' '[:lower:]')"
+            [[ "$lc_base" == *"$lc_f"* ]] && match=1
+        done
         [ "$match" = 1 ] || continue
     fi
     # Run all of this model's output through one group piped to tee, so it prints
