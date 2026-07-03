@@ -35,6 +35,7 @@ BUILD_DIR="build-android-${BACKEND}"
 RESULTS="results-android"
 [ -f "$MODEL" ] || { echo "model not found: $MODEL"; exit 1; }
 MODEL_BASE="$(basename "$MODEL")"
+MODEL_TAG="${MODEL_BASE%.gguf}"   # in result filenames so different models don't clobber
 
 # --- locate NDK ---
 NDK="${ANDROID_NDK:-}"
@@ -102,7 +103,7 @@ for SER in $SERIALS; do
     adbh -s "$SER" push "$REMOTE_DIR/reuse_test"    "$DEV_DIR/reuse_test" >/dev/null 2>&1
     adbh -s "$SER" push "$REMOTE_DIR/$MODEL_BASE"   "$DEV_DIR/$MODEL_BASE" >/dev/null 2>&1
     adbh -s "$SER" shell "chmod 755 $DEV_DIR/reuse_test"
-    OUT="$RESULTS/${BACKEND}-${MODEL_NAME}-${SER}.txt"
+    OUT="$RESULTS/${BACKEND}-${MODEL_TAG}-${MODEL_NAME}-${SER}.txt"
     # OpenCL: offload to GPU (NGL) and resolve libOpenCL.so from the device's own
     # vendor driver -- our linked stub only exists to satisfy the linker at build time.
     ENV=""

@@ -1,0 +1,8 @@
+1 |     23 |      2866.5 |      1683.5 | cold       |  1.70x
+2 |     88 |      5828.9 |      4690.2 | restore    |  1.24x
+3 |    151 |      9759.6 |      4541.5 | restore    |  2.15x
+4 |    214 |     13778.9 |      4574.2 | restore    |  3.01x
+5 |    278 |     17849.2 |      4627.6 | restore    |  3.86x
+total off=50083.1ms  memory=20117ms  overall speedup=2.4896x
+checkpoint blob = 22.6584 MB (marginal RAM cost, ~constant on recurrent)
+== summary (overall speedup per device) ==

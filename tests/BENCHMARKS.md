@@ -15,17 +15,47 @@ restored and only the new tail reprocessed). The checkpoint blob is the marginal
 RAM cost. `bench off` / `bench memory` run a single mode and print peak RSS for a
 cross-process comparison.
 
-The win only exists when a turn would otherwise WIPE. On a pure-recurrent model
-(Mamba) every divergent turn wipes without the checkpoint, so it is the clearest
-demonstrator. On a hybrid model with bounded recurrent rollback (LFM2.5) plain
-append is absorbed without a wipe, so the checkpoint is unused there — a true
-result, not a bench artifact.
+The win only exists when a turn would otherwise WIPE. That depends on the model:
 
-## CPU results — Mamba-130M, 8-turn chat, off vs memory
+- **Qwen3.5** (hybrid) is the canonical target. Its chat template strips the empty
+  `<think></think>` the model emits, so the re-rendered history diverges from the
+  cache mid-sequence every turn and the recurrent `seq_rm` fails -> full wipe
+  without the checkpoint. This is the case the feature was built for.
+  (`RNLLAMA_BENCH_REALCHAT=1` reproduces the think-strip authentically; the hybrid
+  `seq_rm` failure also forces the wipe under the default fixed replies.)
+- **Mamba** (pure recurrent) wipes on every divergent turn — the clearest small
+  demonstrator.
+- **Granite-4** (hybrid mamba2+attn) is mixed: its bounded rollback absorbs later
+  turns but not the first few, so it restores early then reuses.
+- **LFM2.5** (hybrid conv+attn) absorbs plain append entirely via rollback, so the
+  checkpoint is unused there — a true result, not a bench artifact.
 
-Off-mode TTFT grows linearly with history (full reprocess); memory-mode stays
-flat (tail-only). Checkpoint blob: **2.67 MB, constant**. Overall speedup and the
-worst single-turn off-mode stall (turn 8, ~614 prompt tokens):
+## CPU results — Qwen3.5-2B (the real-world case), 5-turn chat
+
+Off-mode TTFT grows linearly with history; memory-mode is flat (tail-only).
+Checkpoint blob: **22.7 MB** — a real 2B hybrid state, much closer to the design's
+54–114 MB envelope than the toy models below. On a 2B model the wipe cost is
+severe: by turn 5 (~278 prompt tokens) off-mode already stalls for **~30 seconds**
+on flagship silicon, held flat at ~7.5 s by the checkpoint.
+
+| Device | SoC | overall | turn-5 off → memory |
+| --- | --- | --- | --- |
+| POCO (2511FPC34G) | Dimensity (mt6899) | 2.47x | 29.1 s → 7.4 s |
+| Galaxy S23 | Snapdragon 8 Gen 2 | 2.38x | 29.5 s → 7.7 s |
+| Xiaomi (canoe) | Snapdragon | 2.49x | 17.8 s → 4.6 s |
+| Pixel 9 | Tensor G4 | 1.74x | fastest CPU; ratio still climbing at turn 5 |
+
+The overall multiplier is lower than Mamba's mainly because a 2B model's memory-mode
+floor (tail reprocess + generation) is itself ~7 s, and the ratio keeps growing with
+turn count. The absolute saving is the story: ~22 s of stall removed per turn by
+turn 5, for 22.7 MB. (The two oldest phones, OnePlus 6 / Redmi, weren't run at 2B —
+a wipe there would be minutes.) Raw logs: `results-android/cpu-Qwen*.txt`.
+
+## CPU results — Mamba-130M, 8-turn chat (clearest small demonstrator)
+
+Off-mode TTFT grows linearly with history; memory-mode stays flat. Checkpoint blob:
+**2.67 MB, constant**. Overall speedup and worst single-turn off stall (turn 8,
+~614 prompt tokens):
 
 | Device | SoC | overall | turn-8 off → memory |
 | --- | --- | --- | --- |
@@ -36,9 +66,9 @@ worst single-turn off-mode stall (turn 8, ~614 prompt tokens):
 | Redmi (Helio) | Helio (mt6768) | 4.2x | 18.7 s → 2.5 s |
 | Xiaomi (canoe) | Snapdragon | ~7x | flat ~0.45 s |
 
-Takeaway: memory-mode TTFT is flat regardless of conversation length; off-mode
-scales with total context. On low-end silicon the checkpoint converts an 18-second
-stall into 2.5 s for a constant 2.67 MB. Raw logs: `results-android/cpu-*.txt`.
+On low-end silicon the checkpoint converts an 18-second stall into 2.5 s for a
+constant 2.67 MB. Granite-4 (hybrid) sits between Mamba and LFM2.5 — mixed
+restore/reuse, ~1.3x on most devices. Raw logs: `results-android/cpu-mamba-*.txt`.
 
 ## GPU (OpenCL) results — the serialization gate
 

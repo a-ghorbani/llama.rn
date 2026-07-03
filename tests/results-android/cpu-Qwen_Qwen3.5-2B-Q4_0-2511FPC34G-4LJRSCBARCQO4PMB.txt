@@ -1,0 +1,7 @@
+1 |     23 |      2424.5 |      2570.8 | cold       |  0.94x
+2 |     88 |      9202.5 |      7467.8 | restore    |  1.23x
+3 |    151 |     15865.9 |      7286.8 | restore    |  2.18x
+4 |    214 |     22437.6 |      7278.4 | restore    |  3.08x
+5 |    278 |     29103.3 |      7366.5 | restore    |  3.95x
+total off=79033.8ms  memory=31970.4ms  overall speedup=2.47209x
+checkpoint blob = 22.6584 MB (marginal RAM cost, ~constant on recurrent)
