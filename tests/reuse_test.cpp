@@ -24,6 +24,10 @@
 #include <filesystem>
 #include <vector>
 #include <string>
+#include <thread>
+#include <cstdio>
+#include <cstring>
+#include <sys/resource.h>
 
 #include "rn-llama.h"
 #include "rn-completion.h"
@@ -681,6 +685,128 @@ static void measure_checkpoint(const char* model_path) {
 }
 
 // ============================================================================
+// Benchmark (./reuse_test <model> bench [off|memory] [n_turns])
+// ----------------------------------------------------------------------------
+// Quantifies the checkpoint tradeoff on a growing multi-turn chat: what the
+// user pays (RAM: the serialized blob) for what they get (latency: prefill /
+// time-to-first-token saved by restoring instead of reprocessing history).
+//
+// No filter -> runs both modes in one process and prints a per-turn speedup
+// table (deterministic, greedy, so the two modes are directly comparable).
+// With a mode filter -> runs only that mode and prints its peak RSS, so a caller
+// (run-android.sh) can diff peak RSS across two separate processes -- the only
+// way to get a true peak-RSS delta, since VmHWM is process-wide.
+// ============================================================================
+static size_t read_status_kb(const char* field) {
+    // Linux/Android: /proc/self/status VmHWM (peak) / VmRSS (current), in kB.
+    FILE* f = fopen("/proc/self/status", "r");
+    if (!f) return 0;
+    char line[256]; size_t kb = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, field, strlen(field)) == 0) {
+            sscanf(line + strlen(field), " %zu", &kb);
+            break;
+        }
+    }
+    fclose(f);
+    return kb;
+}
+static double peak_rss_mb() {
+    size_t kb = read_status_kb("VmHWM:");        // Linux/Android
+    if (kb) return kb / 1024.0;
+    struct rusage ru;                            // macOS fallback (ru_maxrss = bytes)
+    if (getrusage(RUSAGE_SELF, &ru) == 0) return ru.ru_maxrss / 1048576.0;
+    return 0.0;
+}
+
+struct BenchTurn { int prompt_toks; double ttft_ms; int reused; ReuseAction action; };
+
+static std::vector<BenchTurn> bench_conversation(llama_rn_context& ctx, bool kv, int n_turns) {
+    ctx.clearCache(true);
+    std::vector<Msg> conv;
+    std::vector<BenchTurn> out;
+    static const char* USER[] = {
+        "Hi! Tell me a short fact about the ocean.",
+        "Interesting. Now tell me one about mountains.",
+        "Nice. And one about rivers?",
+        "Great. What about deserts?",
+        "Cool. Tell me about forests now.",
+        "Thanks. One more about volcanoes.",
+        "And glaciers?",
+        "Finally, one about coral reefs.",
+    };
+    const int nprompt = (int)(sizeof(USER) / sizeof(USER[0]));
+    for (int t = 0; t < n_turns; t++) {
+        conv.push_back({"user", USER[t % nprompt]});
+        TurnOptions o; o.n_predict = 24; o.kv_checkpoint = kv;
+        std::string prompt = format_chat(ctx, conv);
+        int ptoks = (int)common_tokenize(ctx.ctx, prompt.c_str(), true, true).size();
+        auto r = run_turn(ctx, prompt, o);
+        out.push_back({ptoks, r.ttft_ms, r.reused, r.action});
+        conv.push_back({"assistant", r.text});
+    }
+    return out;
+}
+
+static int run_bench(const char* model_path, const std::string& mode_filter, int n_turns) {
+    auto load = [&](llama_rn_context& ctx) {
+        common_params p; p.model.path = model_path;
+        p.n_ctx = 4096; p.n_batch = 512;
+        p.cpuparams.n_threads = std::max(1u, std::thread::hardware_concurrency() / 2);
+        const char* env = getenv("RNLLAMA_BENCH_NGL");
+        p.n_gpu_layers = env ? atoi(env) : 0;
+        return ctx.loadModel(p);
+    };
+
+    std::cout << "\n===== BENCH :: " << model_path
+              << "  (turns=" << n_turns << ", threads="
+              << std::max(1u, std::thread::hardware_concurrency() / 2) << ") =====\n";
+
+    // Single-mode: report per-turn TTFT + peak RSS + blob size for cross-process diff.
+    if (mode_filter == "off" || mode_filter == "memory") {
+        const bool kv = (mode_filter == "memory");
+        llama_rn_context ctx;
+        if (!load(ctx)) { std::cout << "load failed\n"; return 2; }
+        auto turns = bench_conversation(ctx, kv, n_turns);
+        size_t blob = kv ? llama_state_seq_get_size(ctx.ctx, 0) : 0;
+        std::cout << "MODE=" << mode_filter << "\n";
+        for (size_t i = 0; i < turns.size(); i++)
+            std::cout << "  turn " << (i + 1) << "  prompt_toks=" << turns[i].prompt_toks
+                      << "  reused=" << turns[i].reused
+                      << "  action=" << action_name(turns[i].action)
+                      << "  ttft_ms=" << turns[i].ttft_ms << "\n";
+        std::cout << "PEAK_RSS_MB=" << peak_rss_mb() << "\n";
+        std::cout << "CHECKPOINT_BLOB_MB=" << (blob / 1048576.0) << "\n";
+        return 0;
+    }
+
+    // Both modes in one process: per-turn speedup table.
+    llama_rn_context ctx_off;   if (!load(ctx_off)) { std::cout << "load failed\n"; return 2; }
+    auto off = bench_conversation(ctx_off, false, n_turns);
+    llama_rn_context ctx_mem;   if (!load(ctx_mem)) { std::cout << "load failed\n"; return 2; }
+    auto mem = bench_conversation(ctx_mem, true, n_turns);
+    size_t blob = llama_state_seq_get_size(ctx_mem.ctx, 0);
+
+    std::cout << "\n turn | p_toks | off_ttft_ms | mem_ttft_ms | mem_action | speedup\n";
+    std::cout << " -----+--------+-------------+-------------+------------+--------\n";
+    double sum_off = 0, sum_mem = 0;
+    for (size_t i = 0; i < off.size() && i < mem.size(); i++) {
+        double sp = mem[i].ttft_ms > 0 ? off[i].ttft_ms / mem[i].ttft_ms : 0;
+        sum_off += off[i].ttft_ms; sum_mem += mem[i].ttft_ms;
+        char row[256];
+        snprintf(row, sizeof(row), " %4zu | %6d | %11.1f | %11.1f | %-10s | %5.2fx\n",
+                 i + 1, off[i].prompt_toks, off[i].ttft_ms, mem[i].ttft_ms,
+                 action_name(mem[i].action), sp);
+        std::cout << row;
+    }
+    std::cout << " -----+--------+-------------+-------------+------------+--------\n";
+    std::cout << " total off=" << sum_off << "ms  memory=" << sum_mem << "ms  overall speedup="
+              << (sum_mem > 0 ? sum_off / sum_mem : 0) << "x\n";
+    std::cout << " checkpoint blob = " << (blob / 1048576.0) << " MB (marginal RAM cost, ~constant on recurrent)\n";
+    return 0;
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -688,6 +814,14 @@ int main(int argc, char** argv) {
     if (argc > 2 && std::string(argv[2]) == "size") {
         measure_checkpoint(argv[1]);
         return 0;
+    }
+    if (argc > 2 && std::string(argv[2]) == "bench") {
+        // ./reuse_test <model> bench [off|memory] [n_turns]
+        std::string mode = (argc > 3) ? argv[3] : "";
+        int n_turns = 6;
+        if (argc > 4) n_turns = atoi(argv[4]);
+        else if (!mode.empty() && mode != "off" && mode != "memory") { n_turns = atoi(mode.c_str()); mode = ""; }
+        return run_bench(argv[1], mode, n_turns > 0 ? n_turns : 6);
     }
 
     // The unit section ALWAYS runs and always gates the exit code.

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -168,6 +169,8 @@ struct TurnResult {
     ReuseAction action = ReuseAction::NONE;  // how loadPrompt resolved the cache
     int predicted = 0;
     std::vector<llama_token> token_ids;      // generated token ids (identity checks)
+    double load_ms = 0.0;                    // loadPrompt time (reuse/restore/wipe decision + restore memcpy)
+    double ttft_ms = 0.0;                    // loadPrompt start -> first generated token (prefill cost)
 };
 
 // Drive one completion turn through the real JSI flow.
@@ -200,14 +203,24 @@ inline TurnResult run_turn(rnllama::llama_rn_context& ctx, const std::string& pr
     c->initSampling();
     c->beginCompletion(opt.chat_format, COMMON_REASONING_FORMAT_NONE,
                        opt.generation_prompt, opt.chat_parser);
-    c->loadPrompt(opt.media);
 
     TurnResult r;
+    using clk = std::chrono::steady_clock;
+    auto ms_since = [](clk::time_point a) {
+        return std::chrono::duration<double, std::milli>(clk::now() - a).count();
+    };
+    const auto t0 = clk::now();
+    c->loadPrompt(opt.media);
+    r.load_ms = ms_since(t0);
     r.reused = c->n_past;
     r.action = c->last_reuse_action;
 
+    bool first = true;
     while (c->has_next_token && r.predicted < opt.n_predict) {
         auto t = c->doCompletion();
+        // The prompt tail is decoded inside the first doCompletion (prefill), so the
+        // first returned token marks time-to-first-token -- the user-facing prefill cost.
+        if (first) { r.ttft_ms = ms_since(t0); first = false; }
         if (t.tok == -1) break;
         r.token_ids.push_back(t.tok);
         r.predicted++;
