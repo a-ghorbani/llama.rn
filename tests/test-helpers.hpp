@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -22,6 +24,18 @@
 namespace rntest {
 
 using ReuseAction = rnllama::llama_rn_context_completion::ReuseAction;
+
+// Silence llama.cpp/ggml INFO+DEBUG logging (create_tensor:, print_info:,
+// load_tensors:, ... -- thousands of lines per model load) so test transcripts are
+// readable. WARN/ERROR still print (real problems, plus the [REUSE] wipe notices).
+// Set RNLLAMA_VERBOSE_LOGS=1 to restore full llama.cpp logging for debugging.
+inline void quiet_llama_logs() {
+    const char* v = getenv("RNLLAMA_VERBOSE_LOGS");
+    if (v && v[0] == '1') return;
+    llama_log_set([](lm_ggml_log_level level, const char* text, void*) {
+        if (level >= LM_GGML_LOG_LEVEL_WARN) fputs(text, stderr);
+    }, nullptr);
+}
 
 // ------------------------------------------------------------------ strings
 

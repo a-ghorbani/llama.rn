@@ -885,6 +885,7 @@ static int run_bench(const char* model_path, const std::string& mode_filter, int
 // ============================================================================
 
 int main(int argc, char** argv) {
+    quiet_llama_logs();   // silence model-load spam; RNLLAMA_VERBOSE_LOGS=1 to restore
     if (argc > 2 && std::string(argv[2]) == "size") {
         measure_checkpoint(argv[1]);
         return 0;

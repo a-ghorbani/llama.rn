@@ -351,6 +351,7 @@ static bool load_ctx(llama_rn_context& ctx, const std::string& model) {
 }
 
 int main(int argc, char** argv) {
+    quiet_llama_logs();   // silence model-load spam; RNLLAMA_VERBOSE_LOGS=1 to restore
     if (argc < 2) {
         std::cout << "usage: ./eval_scenarios_test <model.gguf> "
                      "[--mmproj <p>] [--image <p>] [--image2 <p>] [--tools] [--smoke]\n";
