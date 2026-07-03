@@ -44,6 +44,8 @@ const MAX_DRAFT_TOKENS = 32
 const DEFAULT_MAX_TOKENS = 128
 const DEFAULT_PARALLEL_SLOTS = 2
 const MAX_PARALLEL_SLOTS = 8
+const DEFAULT_REQUESTS = 1
+const MAX_REQUESTS = 16
 const MTP_CONTEXT = 4096
 const MTP_BATCH = 1024
 const MTP_UBATCH = 512
@@ -302,6 +304,9 @@ export default function MTPSpeculativeScreen({
   const [parallelSlotsText, setParallelSlotsText] = useState(
     DEFAULT_PARALLEL_SLOTS.toString(),
   )
+  const [requestCountText, setRequestCountText] = useState(
+    DEFAULT_REQUESTS.toString(),
+  )
   const [isMTPEnabled, setIsMTPEnabled] = useState(true)
   const [draftCapacity, setDraftCapacity] = useState(DEFAULT_DRAFT_TOKENS)
   const [slotCapacity, setSlotCapacity] = useState(DEFAULT_PARALLEL_SLOTS)
@@ -346,6 +351,11 @@ export default function MTPSpeculativeScreen({
         MAX_PARALLEL_SLOTS,
       ),
     [parallelSlotsText],
+  )
+  const requestCount = useMemo(
+    () =>
+      parseBoundedInteger(requestCountText, DEFAULT_REQUESTS, 1, MAX_REQUESTS),
+    [requestCountText],
   )
   const displayedMetrics = lastRunMetrics
 
@@ -467,11 +477,18 @@ export default function MTPSpeculativeScreen({
       return
     }
 
-    const prompts = getPromptLines(prompt)
-    if (prompts.length === 0) {
+    const baseLines = getPromptLines(prompt)
+    if (baseLines.length === 0) {
       Alert.alert('Error', 'Please enter at least one prompt.')
       return
     }
+    // Send exactly `requestCount` requests, cycling through the prompt lines.
+    // Set Requests=1 for a clean single-stream MTP vs non-MTP comparison.
+    // `?? ''` only satisfies noUncheckedIndexedAccess; baseLines is non-empty.
+    const prompts: string[] = Array.from(
+      { length: requestCount },
+      (_, i) => baseLines[i % baseLines.length] ?? '',
+    )
     if (isMTPEnabled && draftTokens > draftCapacity) {
       Alert.alert(
         'Error',
@@ -799,6 +816,16 @@ export default function MTPSpeculativeScreen({
               value={maxTokensText}
               onChangeText={setMaxTokensText}
               placeholder={DEFAULT_MAX_TOKENS.toString()}
+              keyboardType="numeric"
+            />
+          </View>
+          <View style={styles.controlItem}>
+            <ParameterTextInput
+              label="Requests"
+              description="How many requests to send (prompt lines are cycled). Use 1 for a clean single-stream MTP vs non-MTP A/B."
+              value={requestCountText}
+              onChangeText={setRequestCountText}
+              placeholder={DEFAULT_REQUESTS.toString()}
               keyboardType="numeric"
             />
           </View>

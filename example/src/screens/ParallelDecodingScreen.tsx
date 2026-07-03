@@ -32,7 +32,10 @@ import {
   type ExampleModelKey,
 } from '../utils/exampleModels'
 import { initLlama, LlamaContext } from '../../../src'
-import type { ParallelStatus } from '../../../src'
+import type {
+  ParallelStatus,
+  RNLlamaOAICompatibleMessage,
+} from '../../../src'
 
 interface ConversationSlot {
   id: string
@@ -64,6 +67,10 @@ const PARALLEL_MODELS = createExampleModelDefinitions(
 
 const SYSTEM_PROMPT =
   'You are a helpful AI assistant. Be concise and direct in your responses.'
+
+// Stable key for the history-mode conversation state file. History mode reuses
+// ONE conversation, so the state path must not vary with the per-turn prompt.
+const HISTORY_THREAD_KEY = 'history-mode-thread'
 
 const EXAMPLE_PROMPTS = [
   'What is the capital of France?',
@@ -117,6 +124,14 @@ export default function ParallelDecodingScreen({
   const [customPrompt, setCustomPrompt] = useState('')
   const [isParallelMode, setIsParallelMode] = useState(false)
   const [isMultimodalEnabled, setIsMultimodalEnabled] = useState(false)
+  // History mode: continue a single conversation across sends (use 1 slot).
+  // Lets you watch slot-path KV-cache reuse climb turn over turn.
+  const [historyMode, setHistoryMode] = useState(false)
+  const [historyTurns, setHistoryTurns] = useState(0)
+  const conversationHistoryRef = useRef<RNLlamaOAICompatibleMessage[]>([])
+  // History mode shares ONE conversation thread + one stable state file, so
+  // only one send may be in flight at a time (see startConversation).
+  const historyInFlightRef = useRef(false)
   const [parallelStatus, setParallelStatus] = useState<ParallelStatus | null>(
     null,
   )
@@ -142,6 +157,23 @@ export default function ParallelDecodingScreen({
     setCompletionParams(params)
   }
 
+  // Delete the stable history-mode state file. Otherwise a fresh thread would
+  // still load_state_path the PREVIOUS conversation on the next send, leaking
+  // it into the new thread.
+  const deleteHistoryStateFile = useCallback(async () => {
+    try {
+      const historyStatePath = buildParallelStatePath(
+        ReactNativeBlobUtil.fs.dirs.CacheDir,
+        modelPathRef.current,
+        HISTORY_THREAD_KEY,
+      )
+      const exists = await ReactNativeBlobUtil.fs.exists(historyStatePath)
+      if (exists) await ReactNativeBlobUtil.fs.unlink(historyStatePath)
+    } catch (err) {
+      console.warn('Failed to delete history-mode state file:', err)
+    }
+  }, [])
+
   const clearSlots = useCallback(async () => {
     // Cancel all active/queued requests first
     const processingSlots = slotsRef.current.filter(
@@ -161,7 +193,14 @@ export default function ParallelDecodingScreen({
     // Then clear all slots
     setSlots([])
     slotsRef.current = []
-  }, [])
+    conversationHistoryRef.current = []
+    historyInFlightRef.current = false
+    setHistoryTurns(0)
+
+    // Drop the stable history-mode state file too (mirrors the History
+    // toggle's cleanup).
+    await deleteHistoryStateFile()
+  }, [deleteHistoryStateFile])
 
   const showParallelInfo = useCallback(() => {
     Alert.alert(
@@ -356,6 +395,19 @@ export default function ParallelDecodingScreen({
       return
     }
 
+    // History mode appends to a single shared conversation thread and reuses
+    // one stable state file. Concurrent sends would race conversationHistoryRef
+    // and that state file (and append turns out of order), so enforce
+    // single-flight: reject a new send until the current turn finishes.
+    if (historyMode && historyInFlightRef.current) {
+      Alert.alert(
+        'History Mode',
+        'Please wait for the current turn to finish before sending another.',
+      )
+      return
+    }
+    if (historyMode) historyInFlightRef.current = true
+
     const slot = addSlot(prompt)
     const slotId = slot.id
     updateSlot(slotId, { status: 'processing', startTime: Date.now() })
@@ -363,11 +415,19 @@ export default function ParallelDecodingScreen({
     try {
       // Load completion params
       const params = completionParams || (await loadCompletionParams())
-      const messages = buildConversationMessages(prompt, images)
+      const baseMessages = buildConversationMessages(prompt, images)
+      // In history mode, splice the running conversation between the system
+      // message and the current user turn so each send extends the same thread.
+      const messages = historyMode
+        ? [baseMessages[0], ...conversationHistoryRef.current, baseMessages[1]]
+        : baseMessages
+      // History mode reuses ONE conversation, so the state file must be stable
+      // across turns (not keyed on the per-turn prompt) — turn N then loads
+      // turn N-1's saved sequence and reuses the matching prefix.
       const statePath = buildParallelStatePath(
         ReactNativeBlobUtil.fs.dirs.CacheDir,
         modelPathRef.current,
-        prompt,
+        historyMode ? HISTORY_THREAD_KEY : prompt,
       )
 
       // Check if state file exists on filesystem
@@ -396,6 +456,25 @@ export default function ParallelDecodingScreen({
       const usePromptState =
         !!context.model?.is_recurrent || !!context.model?.is_hybrid
 
+      // State management: load previous state if exists, always save.
+      // In history mode we save the FULL state (prompt + generation) under the
+      // stable path so the next turn can reuse the whole prior sequence — hence
+      // no save_state_size. Otherwise recurrent/hybrid models save a prompt
+      // state and the rest save a sized full state. Split out to avoid nesting.
+      const hasQuestionTokens = questionTokenCount > 0
+      let saveStatePath: string | undefined
+      if (historyMode || (!usePromptState && hasQuestionTokens)) {
+        saveStatePath = statePath
+      }
+      const savePromptStatePath =
+        !historyMode && usePromptState && hasQuestionTokens
+          ? statePath
+          : undefined
+      const saveStateSize =
+        !historyMode && !usePromptState && hasQuestionTokens
+          ? questionTokenCount
+          : undefined
+
       // Use parallel.completion for parallel processing with messages format
       const { requestId, promise, stop } = await context.parallel.completion(
         {
@@ -403,16 +482,10 @@ export default function ParallelDecodingScreen({
           ...params,
           reasoning_format: 'auto',
           n_predict: params.n_predict || 50,
-          // State management: load previous state if exists, always save
           load_state_path: loadStatePath,
-          save_prompt_state_path:
-            usePromptState && questionTokenCount > 0 ? statePath : undefined,
-          save_state_path:
-            !usePromptState && questionTokenCount > 0 ? statePath : undefined,
-          save_state_size:
-            !usePromptState && questionTokenCount > 0
-              ? questionTokenCount
-              : undefined,
+          save_prompt_state_path: savePromptStatePath,
+          save_state_path: saveStatePath,
+          save_state_size: saveStateSize,
         },
         (_reqId, data) => {
           const currentSlot = slotsRef.current.find((t) => t.id === slotId)
@@ -428,7 +501,25 @@ export default function ParallelDecodingScreen({
       updateSlot(slotId, { requestId, stop })
 
       void settleConversationResult(slotId, promise)
+      if (historyMode) {
+        promise
+          .then((result) => {
+            conversationHistoryRef.current = [
+              ...conversationHistoryRef.current,
+              { role: 'user', content: prompt },
+              { role: 'assistant', content: result.text || '' },
+            ]
+            setHistoryTurns(conversationHistoryRef.current.length / 2)
+          })
+          .catch(() => {})
+          .finally(() => {
+            historyInFlightRef.current = false
+          })
+      }
     } catch (error) {
+      // Release the single-flight lock if we failed before the completion
+      // promise was created (the .finally above never runs in that case).
+      if (historyMode) historyInFlightRef.current = false
       console.error('Completion error:', error)
       updateSlot(slotId, {
         status: 'error',
@@ -834,6 +925,22 @@ export default function ParallelDecodingScreen({
             <Text style={styles.buttonText}>Clear State Files</Text>
           </TouchableOpacity>
         </View>
+        <TouchableOpacity
+          style={[styles.button, styles.historyToggleButton]}
+          onPress={() => {
+            setHistoryMode(!historyMode)
+            conversationHistoryRef.current = []
+            setHistoryTurns(0)
+            // Drop the stable conversation state file so a fresh thread starts clean.
+            deleteHistoryStateFile()
+          }}
+        >
+          <Text style={styles.buttonText}>
+            {historyMode
+              ? `History Mode: ON — ${historyTurns} turn(s) · use 1 slot`
+              : 'History Mode: OFF (each send is one-shot)'}
+          </Text>
+        </TouchableOpacity>
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
@@ -943,7 +1050,10 @@ export default function ParallelDecodingScreen({
   )
 }
 
-function buildConversationMessages(prompt: string, images?: string[]) {
+function buildConversationMessages(
+  prompt: string,
+  images?: string[],
+): [RNLlamaOAICompatibleMessage, RNLlamaOAICompatibleMessage] {
   const userContent: Array<{
     type: 'text' | 'image_url'
     text?: string
@@ -1211,6 +1321,12 @@ function createStyles(
       marginHorizontal: 4,
       alignItems: 'center' as const,
       justifyContent: 'center' as const,
+    },
+    historyToggleButton: {
+      flex: 0,
+      alignSelf: 'stretch' as const,
+      marginHorizontal: 0,
+      marginBottom: 8,
     },
     buttonDisabled: {
       backgroundColor: theme.colors.border,
