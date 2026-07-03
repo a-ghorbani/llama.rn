@@ -744,15 +744,23 @@ static std::vector<BenchTurn> bench_conversation(llama_rn_context& ctx, bool kv,
         "That is a wonderful question to explore. Nature is full of remarkable details, "
         "and the more closely you look, the more patterns and surprises you find hidden "
         "within the ordinary world around us every single day, everywhere you choose to look.";
+    // RNLLAMA_BENCH_REALCHAT=1 feeds the model's OWN reply back as history instead
+    // of the canned one. This is what reproduces the Qwen3.5 case: the model emits an
+    // (often empty) <think></think> block that the chat template strips on re-render,
+    // so the cached prefix diverges mid-sequence every turn and a hybrid model without
+    // a checkpoint must wipe. Costs determinism (the reply varies with the backend),
+    // so the default stays on fixed replies.
+    const char* realchat = getenv("RNLLAMA_BENCH_REALCHAT");
+    const bool use_real_reply = realchat && realchat[0] == '1';
     const int nprompt = (int)(sizeof(USER) / sizeof(USER[0]));
     for (int t = 0; t < n_turns; t++) {
         conv.push_back({"user", USER[t % nprompt]});
-        TurnOptions o; o.n_predict = 12; o.kv_checkpoint = kv;
+        TurnOptions o; o.n_predict = use_real_reply ? 48 : 12; o.kv_checkpoint = kv;
         std::string prompt = format_chat(ctx, conv);
         int ptoks = (int)common_tokenize(ctx.ctx, prompt.c_str(), true, true).size();
         auto r = run_turn(ctx, prompt, o);
         out.push_back({ptoks, r.ttft_ms, r.reused, r.action});
-        conv.push_back({"assistant", REPLY});
+        conv.push_back({"assistant", use_real_reply ? r.text : REPLY});
     }
     return out;
 }

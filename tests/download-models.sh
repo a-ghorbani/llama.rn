@@ -36,6 +36,10 @@ manifest() {
         # Pinned quant: the QuantFactory Q8_0 fails to load on the current
         # llama.cpp sync (unreadable tensor info); tensorblock's Q3_K_M loads.
         mamba)    echo "tensorblock/mamba-130m-hf-GGUF|mamba-130m-hf-Q3_K_M.gguf" ;;
+        # Qwen3.5 is hybrid AND its chat template strips the empty <think></think>
+        # the model emits, forcing a mid-sequence divergence -> full wipe every turn.
+        # The canonical case the checkpoint targets. Use RNLLAMA_BENCH_REALCHAT=1.
+        qwen35)   echo "bartowski/Qwen_Qwen3.5-2B-GGUF|Qwen_Qwen3.5-2B-Q4_0.gguf" ;;
         gemma4)   echo "bartowski/google_gemma-4-E2B-it-GGUF|google_gemma-4-E2B-it-Q4_K_M.gguf"
                   echo "bartowski/google_gemma-4-E2B-it-GGUF|mmproj-google_gemma-4-E2B-it-f16.gguf" ;;
         *) echo "unknown model: $1" >&2; return 1 ;;
