@@ -121,6 +121,18 @@ cd tests && ./build_and_test.sh
 ./build/reuse_test models/mamba-130m-hf-Q3_K_M.gguf bench 8
 ```
 
+See the actual conversations (user prompt + the model's reply + per-turn reuse
+action, for checkpoint off vs memory) across every downloaded model:
+
+```bash
+./run-local.sh 4               # real replies (model's own output), 4 turns
+./run-local.sh 4 qwen mamba    # only matching models
+```
+
+`RNLLAMA_BENCH_VERBOSE=1` on a single `bench` run does the same for one model;
+`RNLLAMA_BENCH_REALCHAT=1` (default in run-local.sh) feeds the model's replies
+back as history so the transcript is a genuine multi-turn chat.
+
 On-device across every attached phone (build here, adb on `$ADB_HOST`):
 
 ```bash

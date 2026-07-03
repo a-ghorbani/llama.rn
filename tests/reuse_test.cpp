@@ -725,6 +725,13 @@ static std::vector<BenchTurn> bench_conversation(llama_rn_context& ctx, bool kv,
     ctx.clearCache(true);
     std::vector<Msg> conv;
     std::vector<BenchTurn> out;
+    // RNLLAMA_BENCH_VERBOSE=1 prints the actual conversation (user prompt + the
+    // model's generated reply) per turn, so you can eyeball coherence -- especially
+    // that RESTORE turns produce sane output. Pair with RNLLAMA_BENCH_REALCHAT=1 to
+    // see a genuine multi-turn conversation (the model's replies become the history).
+    const char* verbose_env = getenv("RNLLAMA_BENCH_VERBOSE");
+    const bool verbose = verbose_env && verbose_env[0] == '1';
+    const char* mode_label = kv ? "memory" : "off";
     static const char* USER[] = {
         "Hi! Tell me a short fact about the ocean.",
         "Interesting. Now tell me one about mountains.",
@@ -752,14 +759,21 @@ static std::vector<BenchTurn> bench_conversation(llama_rn_context& ctx, bool kv,
     // so the default stays on fixed replies.
     const char* realchat = getenv("RNLLAMA_BENCH_REALCHAT");
     const bool use_real_reply = realchat && realchat[0] == '1';
+    // In verbose mode generate a readable reply length even under fixed-reply mode.
+    const int n_predict = (use_real_reply || verbose) ? 48 : 12;
     const int nprompt = (int)(sizeof(USER) / sizeof(USER[0]));
     for (int t = 0; t < n_turns; t++) {
         conv.push_back({"user", USER[t % nprompt]});
-        TurnOptions o; o.n_predict = use_real_reply ? 48 : 12; o.kv_checkpoint = kv;
+        TurnOptions o; o.n_predict = n_predict; o.kv_checkpoint = kv;
         std::string prompt = format_chat(ctx, conv);
         int ptoks = (int)common_tokenize(ctx.ctx, prompt.c_str(), true, true).size();
         auto r = run_turn(ctx, prompt, o);
         out.push_back({ptoks, r.ttft_ms, r.reused, r.action});
+        if (verbose) {
+            std::cout << "[" << mode_label << "][turn " << (t + 1) << "] "
+                      << action_name(r.action) << "  user: " << USER[t % nprompt] << "\n"
+                      << "        reply: " << r.text << "\n";
+        }
         conv.push_back({"assistant", use_real_reply ? r.text : REPLY});
     }
     return out;
