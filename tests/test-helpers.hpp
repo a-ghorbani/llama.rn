@@ -27,11 +27,27 @@ using ReuseAction = rnllama::llama_rn_context_completion::ReuseAction;
 struct Msg { std::string role, content; };
 
 inline std::string json_escape(const std::string& s) {
+    // Full JSON string escaping. Weak models (e.g. mamba-130m) can emit raw
+    // control characters; feeding that back as a chat message must not produce
+    // a JSON string that fails to parse.
+    static const char* hex = "0123456789abcdef";
     std::string o;
-    for (char c : s) {
-        if (c == '"' || c == '\\') { o += '\\'; o += c; }
-        else if (c == '\n') o += "\\n";
-        else o += c;
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n";  break;
+            case '\r': o += "\\r";  break;
+            case '\t': o += "\\t";  break;
+            default:
+                if (c < 0x20) { // any other control char -> \u00XX
+                    o += "\\u00";
+                    o += hex[(c >> 4) & 0xF];
+                    o += hex[c & 0xF];
+                } else {
+                    o += (char)c;
+                }
+        }
     }
     return o;
 }

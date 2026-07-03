@@ -120,7 +120,9 @@ struct ModeResults {
     std::vector<std::vector<llama_token>> b_tokens;  // B turns
     std::vector<ReuseAction> a_actions;              // A per-turn reuse action
     std::string a_t3_text;                           // A t3 generated text (coherence)
+    std::string b_text;                              // B generated text (coherence)
     bool a_restore_fired = false;                    // any A turn took a RESTORE
+    bool b_restore_fired = false;                    // B turn took a RESTORE
     ToolBehavior tools;                              // E tool behavior (consistency)
 };
 
@@ -183,6 +185,8 @@ static void run_B(llama_rn_context& ctx, const std::string& mode, bool kv,
     hard_check("B[" + mode + "] does NOT leak old hobby (hiking)", !contains_word(t.text, "hiking"));
 
     mr.b_tokens = {t.token_ids};
+    mr.b_text = t.text;
+    mr.b_restore_fired = (t.action == ReuseAction::RESTORE);
 }
 
 // ------- C: NEW SESSION (isolation + coherence) -------
@@ -477,7 +481,22 @@ int main(int argc, char** argv) {
         compare_tokens("A", off_res.a_tokens, mem_res.a_tokens);
     }
 
-    compare_tokens("B", off_res.b_tokens, mem_res.b_tokens);
+    // Strict off==memory token-identity in B holds only if NO restore fired in
+    // the memory-mode session up to here. B keeps the prior session state (no
+    // clearCache), so once a restore fired in A -- or in B itself -- the memory
+    // path carries a coherent-but-not-bit-identical recurrent state (FP
+    // non-associativity) that B's reprocess inherits. That is the documented
+    // restore behavior propagating one hop, not a divergence B introduces, so we
+    // assert coherence instead of byte-equality (leak/edit asserts already ran).
+    if (mem_res.a_restore_fired || mem_res.b_restore_fired) {
+        std::cout << "  NOTE: a restore fired earlier in memory mode -> B inherits "
+                     "coherent+context-preserving (not bit-identical) state; strict "
+                     "off==memory token-identity intentionally not asserted.\n";
+        capability_check("B[memory] coherent (not garbage)",
+                         !looks_like_garbage(mem_res.b_text));
+    } else {
+        compare_tokens("B", off_res.b_tokens, mem_res.b_tokens);
+    }
 
     // ---- Scenario A: per-turn WIPE -> RESTORE pairing ----
     // If the off-mode baseline WIPED at some turn, the divergence forcing that wipe

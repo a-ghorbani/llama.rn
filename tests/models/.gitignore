@@ -1,0 +1,3 @@
+# Downloaded test models are large (150 MB - 4 GB) and must never be committed.
+# Fetch them with ../download-models.sh; they route to the right suite by arch.
+*.gguf

@@ -173,8 +173,9 @@ int main(int argc, char** argv) {
     std::cout << "n_swa = " << n_swa << "  (0 == dense, no sliding window)\n";
     if (n_swa <= 0) {
         std::cout << "SKIP: model is not SWA, this bug cannot occur here. "
-                     "Run with a Gemma 3 / 3n model to reproduce.\n";
-        return 0;
+                     "Run with a Gemma 4 / 3 / 3n model to reproduce.\n";
+        return 3; // distinct from a real PASS (0) so runners don't misread a
+                  // dense-model skip as "the bug got fixed".
     }
 
     // Shared early prefix S, carrying a secret only recallable if its KV survives.

@@ -30,20 +30,46 @@ cmake --build build -j 8
   weights — fast, deterministic with `temp=0`, but it cannot "answer" anything,
   so capability asserts are only meaningful on real models)
 
-## Model-gated suites
+## Real-model matrix (recommended)
 
-The default `./run_tests.sh` run only uses the bundled tiny model. Suites that
-need a real model are gated behind env vars and are reported as SKIP otherwise:
+The default `./run_tests.sh` run only uses the bundled tiny model. To validate
+the feature against the real memory architectures it branches on, download the
+per-arch matrix — the models are git-ignored (`tests/models/`) and picked up
+automatically; each binary detects arch at runtime and SKIPs the suites that
+don't apply, so no per-model wiring is needed.
+
+```bash
+cd tests
+./download-models.sh          # core set (~1 GB: SmolLM2, LFM2.5, Granite-4, Mamba)
+./download-models.sh --all    # + Gemma-4-E2B (SWA + VLM, ~4 GB)
+./run_tests.sh                # runs every tests/models/*.gguf through the matrix
+```
+
+| Model | Arch class | What it proves |
+| --- | --- | --- |
+| SmolLM2-135M | pure-attention | checkpoint is a **no-op** (off==memory bit-identical) |
+| LFM2.5-230M | hybrid (conv+attn) | main restore path (arch reports `lfm2`) |
+| Granite-4.0-h-350M | hybrid (mamba2+attn) | different hybrid state layout |
+| Mamba-130M | pure recurrent (SSM) | seq_rm always fails, no attention state |
+| Gemma-4-E2B | SWA + vision | `n_swa` gate refuses the checkpoint; KNOWN-RED swa repro; VLM scenario D (its mmproj is auto-wired) |
+
+A projector named `mmproj-<model>.gguf` next to a model enables eval scenario D
+for it (Gemma-4 ships one). The auto-loop runs `eval_scenarios_test` in `--smoke`
+mode (feature asserts hard, capability asserts informational) so a small model's
+weak recall never red-flags the feature.
+
+## Explicit env-var overrides
+
+For a full-capability eval on a specific model (hard recall asserts), or to point
+at a model outside `tests/models/`:
 
 | Env var | Model to provide | What it unlocks |
 | --- | --- | --- |
-| `RNLLAMA_TEST_HYBRID_MODEL` | hybrid/SSM chat gguf (LFM2/LFM2.5, Granite-4, Mamba, Qwen3.5, Falcon-H) | `reuse_test` KV-checkpoint validation gates (leak, perf, 2nd-reuse chain, determinism, restore-failure, ctx-shift, embedding no-clobber) |
-| `RNLLAMA_TEST_MODEL` | any real chat gguf | `eval_scenarios_test` full eval (hard capability asserts) |
+| `RNLLAMA_TEST_HYBRID_MODEL` | hybrid/SSM chat gguf | `reuse_test` KV-checkpoint validation gates (leak, perf, 2nd-reuse chain, determinism, restore-failure, ctx-shift, embedding no-clobber) |
+| `RNLLAMA_TEST_MODEL` | any real chat gguf | `eval_scenarios_test` full eval (hard capability asserts, no `--smoke`) |
 | `RNLLAMA_TEST_MMPROJ` / `RNLLAMA_TEST_IMAGE` / `RNLLAMA_TEST_IMAGE2` | matching mmproj + two test images | eval scenario D (VLM grounding, same-image reuse, image-swap answer change) |
 | `RNLLAMA_TEST_TOOLS=1` | — | eval scenario E (tool calling consistency) |
-| `RNLLAMA_TEST_SWA_MODEL` | SWA gguf (Gemma 3 / Gemma 3n) | `swa_cache_corruption_test` — KNOWN-RED repro, see below |
-
-Example:
+| `RNLLAMA_TEST_SWA_MODEL` | SWA gguf (Gemma 4 / 3 / 3n) | `swa_cache_corruption_test` — KNOWN-RED repro, see below |
 
 ```bash
 RNLLAMA_TEST_HYBRID_MODEL=~/models/lfm2-1.2b-q4_k_m.gguf \
