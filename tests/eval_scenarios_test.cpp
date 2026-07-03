@@ -7,8 +7,8 @@
 // a FRESH llama_rn_context (clearCache does not fully reset SWA state, which
 // would contaminate the cross-mode token-identity comparison):
 //   A. APPEND  — multi-turn memory; off==memory must be TOKEN-IDENTICAL
-//   B. EDIT    — regenerate an earlier turn; response reflects the edit
-//   C. NEW SESSION — clearCache, unrelated chat, no leakage + coherent
+//   B. EDIT    — change the first user message; response reflects the edit, no leak
+//   C. NEW SESSION — no clearCache; reuse system prefix, probe name directly, no leak
 //   D. VLM     — (only with --mmproj) image grounding, same-image prefix reuse,
 //                image-swap answer change
 //   E. TOOLS   — (only with --tools) tool call + tool result follow-up
@@ -168,16 +168,17 @@ static void run_A(llama_rn_context& ctx, const std::string& mode, bool kv,
 // ------- B: EDIT (regenerate an earlier turn) -------
 static void run_B(llama_rn_context& ctx, const std::string& mode, bool kv,
                   ModeResults& mr) {
-    // Reuse the prior session state on purpose (no clearCache): editing t1 forces
-    // a mid-sequence divergence -> exercises the reuse/restore/wipe decision.
+    // Reuse the prior session state on purpose (no clearCache): starting a new
+    // conversation whose first user message differs from the cached one (Ali ->
+    // Sam) forces a mid-sequence divergence -> exercises the reuse/restore/wipe
+    // decision. One well-formed user turn (not two consecutive user turns, which
+    // render an unnatural prompt and make chat models slip into first person).
     std::vector<Msg> conv;
-    conv.push_back({"user", "Hi, my name is Sam and my hobby is cooking."});
-    conv.push_back({"user", "What is my name and hobby?"});
+    conv.push_back({"user", "Hi, my name is Sam and my hobby is cooking. What is my name and hobby?"});
 
-    // single combined turn (t1 edited, t2/t3 dropped)
     auto t = run_turn(ctx, format_chat(ctx, conv), plain(80, kv));
     print_turn(mode, "B-edit", "t1",
-               "Hi, my name is Sam and my hobby is cooking. / What is my name and hobby?", t);
+               "Hi, my name is Sam and my hobby is cooking. What is my name and hobby?", t);
 
     capability_check("B[" + mode + "] reflects edit name (sam)", contains(t.text, "sam"));
     capability_check("B[" + mode + "] reflects edit hobby (cooking)", contains(t.text, "cook"));
@@ -189,16 +190,41 @@ static void run_B(llama_rn_context& ctx, const std::string& mode, bool kv,
     mr.b_restore_fired = (t.action == ReuseAction::RESTORE);
 }
 
-// ------- C: NEW SESSION (isolation + coherence) -------
+// ------- C: NEW SESSION (isolation via prefix reuse, not clearCache) -------
 static void run_C(llama_rn_context& ctx, const std::string& mode, bool kv) {
-    ctx.clearCache(false);
-    std::vector<Msg> conv = {{"user", "Tell me one fact about the moon."}};
-    auto t = run_turn(ctx, format_chat(ctx, conv), plain(80, kv));
-    print_turn(mode, "C-newsession", "t1", "Tell me one fact about the moon.", t);
+    // A new session does NOT clearCache. Practically it is like editing the first user
+    // message: reuse the cached SYSTEM-PROMPT prefix (so a large system prompt is not
+    // reprocessed) and start a fresh user turn. The private data from the previous
+    // session must be gone. We probe for it DIRECTLY -- asking the name/hobby -- because
+    // an unrelated question (e.g. "a fact about the moon") would never surface a leaked
+    // name and so tests almost nothing.
+    static const std::string SYS =
+        "You are a concise assistant. Answer in one short sentence.";
 
-    hard_check("C[" + mode + "] no leakage of 'ali'", !contains_word(t.text, "ali"));
-    hard_check("C[" + mode + "] no leakage of 'sam'", !contains_word(t.text, "sam"));
-    capability_check("C[" + mode + "] coherent (not garbage)", !looks_like_garbage(t.text));
+    // Harness setup only: one reset, then session 1 stores private data under SYS.
+    // (This reset is the test isolating itself from A/B -- it is NOT the "new session".)
+    ctx.clearCache(false);
+    run_turn(ctx, format_chat(ctx, {{"system", SYS},
+             {"user", "My name is Zoe and my hobby is painting. Just reply OK."}}), plain(8, kv));
+
+    // The NEW SESSION: SAME system prompt (prefix reused, not reprocessed), a fresh
+    // question, and NO clearCache between the two. Ask directly for the private data.
+    std::vector<Msg> conv = {{"system", SYS},
+             {"user", "What is my name and what is my hobby? If you do not know, reply exactly: I don't know."}};
+    auto t = run_turn(ctx, format_chat(ctx, conv), plain(40, kv));
+    print_turn(mode, "C-newsession", "t2",
+               "[new session, shared system prompt] What is my name and hobby?", t);
+    std::cout << "  (new session: reused=" << t.reused << " action=" << action_name(t.action)
+              << " -- pure-attention reuses the system prefix; recurrent wipes)\n";
+
+    // The real leak check: the new session cannot know session 1's private data.
+    hard_check("C[" + mode + "] does NOT leak prior name 'zoe'",     !contains_word(t.text, "zoe"));
+    hard_check("C[" + mode + "] does NOT leak prior hobby 'painting'", !contains_word(t.text, "painting"));
+    const std::string lo = lower(t.text);
+    const bool disclaims = contains(lo, "know") || contains(lo, "don't have") ||
+        contains(lo, "do not have") || contains(lo, "no name") || contains(lo, "as an ai") ||
+        contains(lo, "cannot") || contains(lo, "haven't told") || contains(lo, "not sure");
+    capability_check("C[" + mode + "] admits it does not know", disclaims);
 }
 
 // ------- D: VLM -------
