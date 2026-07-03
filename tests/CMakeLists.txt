@@ -109,6 +109,10 @@ elseif(UNIX AND NOT APPLE)
         m  # Math library
         dl # Dynamic loading library
     )
+    if(ANDROID)
+        # llama/ggml route logging through __android_log_* when __ANDROID__ is set.
+        target_link_libraries(rnllama_test_core INTERFACE log)
+    endif()
 endif()
 
 # One test executable = one source file + the shared core.
