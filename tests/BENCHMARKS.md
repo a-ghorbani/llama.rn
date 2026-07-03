@@ -121,17 +121,21 @@ cd tests && ./build_and_test.sh
 ./build/reuse_test models/mamba-130m-hf-Q3_K_M.gguf bench 8
 ```
 
-See the actual conversations (user prompt + the model's reply + per-turn reuse
-action, for checkpoint off vs memory) across every downloaded model:
+Run the full behavioral + performance suites with real transcripts across every
+downloaded model — includes the append/recall, edit-no-leak, and new-session-no-leak
+scenarios (plus VLM/tools where applicable) *and* the off-vs-memory perf chat:
 
 ```bash
-./run-local.sh 4               # real replies (model's own output), 4 turns
-./run-local.sh 4 qwen mamba    # only matching models
+./run-local.sh                 # all models
+./run-local.sh qwen mamba      # only matching models
+BENCH_TURNS=6 ./run-local.sh   # longer perf chat
+SKIP_BENCH=1 ./run-local.sh    # behavioral scenarios only (SKIP_EVAL=1 = perf only)
 ```
 
-`RNLLAMA_BENCH_VERBOSE=1` on a single `bench` run does the same for one model;
-`RNLLAMA_BENCH_REALCHAT=1` (default in run-local.sh) feeds the model's replies
-back as history so the transcript is a genuine multi-turn chat.
+For just the perf view of one model: `RNLLAMA_BENCH_VERBOSE=1 ./build/reuse_test
+models/<m>.gguf bench 4` (add `RNLLAMA_BENCH_REALCHAT=1` for a genuine multi-turn
+chat). For just the correctness gates of one model: `./build/reuse_test models/<m>.gguf`
+(runs the clearCache leak gate + checkpoint validation).
 
 On-device across every attached phone (build here, adb on `$ADB_HOST`):
 
