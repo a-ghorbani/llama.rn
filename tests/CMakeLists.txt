@@ -115,6 +115,43 @@ elseif(UNIX AND NOT APPLE)
     endif()
 endif()
 
+# Optional OpenCL (GPU) backend, mirroring android/src/main/rnllama/CMakeLists.txt.
+# Enable with -DGGML_OPENCL=ON (Android only; needs bin/<ABI>/libOpenCL.so from
+# ./scripts/build-opencl.sh and a Python3 for kernel embedding). At runtime, set
+# RNLLAMA_BENCH_NGL=99 so the bench offloads layers to the GPU.
+option(GGML_OPENCL "Build the OpenCL backend into the test core" OFF)
+if(GGML_OPENCL)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(OPENCL_DIR ${SOURCE_DIR}/ggml-opencl)
+    file(GLOB OPENCL_KERNEL_FILES ${OPENCL_DIR}/kernels/*.cl)
+    set(OPENCL_KERNEL_HEADERS "")
+    foreach(kfile ${OPENCL_KERNEL_FILES})
+        get_filename_component(kname ${kfile} NAME_WE)
+        set(kout ${CMAKE_CURRENT_BINARY_DIR}/${kname}.cl.h)
+        add_custom_command(OUTPUT ${kout}
+            COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=${OPENCL_DIR}/kernels
+                    ${Python3_EXECUTABLE} ${OPENCL_DIR}/kernels/embed_kernel.py ${kfile} ${kout}
+            DEPENDS ${kfile} ${OPENCL_DIR}/kernels/embed_kernel.py
+            COMMENT "opencl: embedding ${kname}.cl")
+        list(APPEND OPENCL_KERNEL_HEADERS ${kout})
+    endforeach()
+    target_sources(rnllama_test_core PRIVATE
+        ${OPENCL_DIR}/ggml-opencl.cpp ${OPENCL_KERNEL_HEADERS})
+    target_include_directories(rnllama_test_core PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/OpenCL-Headers
+        ${CMAKE_CURRENT_BINARY_DIR})
+    target_compile_definitions(rnllama_test_core PRIVATE
+        LM_GGML_USE_OPENCL LM_GGML_OPENCL_USE_ADRENO_KERNELS
+        LM_GGML_OPENCL_EMBED_KERNELS LM_GGML_OPENCL_SOA_Q)
+    set(OPENCL_STUB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../bin/${ANDROID_ABI})
+    if(EXISTS ${OPENCL_STUB_DIR}/libOpenCL.so)
+        target_link_directories(rnllama_test_core INTERFACE ${OPENCL_STUB_DIR})
+        target_link_libraries(rnllama_test_core INTERFACE OpenCL)
+    else()
+        message(FATAL_ERROR "libOpenCL.so not found in ${OPENCL_STUB_DIR}; run ./scripts/build-opencl.sh")
+    endif()
+endif()
+
 # One test executable = one source file + the shared core.
 function(add_rnllama_test name source)
     add_executable(${name} ${source})

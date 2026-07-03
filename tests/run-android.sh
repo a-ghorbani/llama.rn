@@ -103,8 +103,11 @@ for SER in $SERIALS; do
     adbh -s "$SER" push "$REMOTE_DIR/$MODEL_BASE"   "$DEV_DIR/$MODEL_BASE" >/dev/null 2>&1
     adbh -s "$SER" shell "chmod 755 $DEV_DIR/reuse_test"
     OUT="$RESULTS/${BACKEND}-${MODEL_NAME}-${SER}.txt"
-    NGL=""; [ "$BACKEND" = "opencl" ] && NGL="RNLLAMA_BENCH_NGL=99 "
-    dev_run "$SER" "${NGL}$DEV_DIR/reuse_test $DEV_DIR/$MODEL_BASE bench $N_TURNS" \
+    # OpenCL: offload to GPU (NGL) and resolve libOpenCL.so from the device's own
+    # vendor driver -- our linked stub only exists to satisfy the linker at build time.
+    ENV=""
+    [ "$BACKEND" = "opencl" ] && ENV="LD_LIBRARY_PATH=/vendor/lib64:/system/vendor/lib64 RNLLAMA_BENCH_NGL=99 "
+    dev_run "$SER" "cd $DEV_DIR; ${ENV}./reuse_test $DEV_DIR/$MODEL_BASE bench $N_TURNS" \
         2>/dev/null | tr -d '\r' | tee "$OUT" | grep -E '^ +[0-9]|overall|blob|BENCH ::' || true
     echo "   -> $OUT"
 done

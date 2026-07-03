@@ -1,0 +1,14 @@
+
+===== BENCH :: /data/local/tmp/rnbench/mamba-130m-hf-Q3_K_M.gguf  (turns=6, threads=4) =====
+
+ turn | p_toks | off_ttft_ms | mem_ttft_ms | mem_action | speedup
+ -----+--------+-------------+-------------+------------+--------
+    1 |     34 |       268.4 |       303.8 | cold       |  0.88x
+    2 |    119 |       903.0 |       676.5 | restore    |  1.33x
+    3 |    202 |      1523.4 |       671.0 | restore    |  2.27x
+    4 |    285 |      2215.3 |       672.1 | restore    |  3.30x
+    5 |    368 |      2830.0 |       671.3 | restore    |  4.22x
+    6 |    451 |      3461.7 |       679.7 | restore    |  5.09x
+ -----+--------+-------------+-------------+------------+--------
+ total off=11201.9ms  memory=3674.41ms  overall speedup=3.04864x
+ checkpoint blob = 2.67245 MB (marginal RAM cost, ~constant on recurrent)
