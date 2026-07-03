@@ -389,6 +389,25 @@ export type NativeCompletionParams = {
    */
   guide_tokens?: Array<number>
 
+  /**
+   * Opt-in KV-cache reuse strategy. Only applies to the legacy (non-parallel)
+   * completion path; queued/parallel completions ignore it.
+   *
+   * - `'off'` (initial state): no checkpoint. On recurrent/hybrid/SWA models a
+   *   cross-turn prompt divergence wipes the whole cache and reprocesses the full
+   *   prompt every turn.
+   * - `'memory'`: snapshot the prompt-boundary state in RAM at the end of each turn's
+   *   prefill, and on the next turn restore it instead of wiping — reusing the shared
+   *   prompt prefix while staying token-identical to the `'off'` baseline. Note: the
+   *   snapshot can be tens of MB for hybrid-SSM models, so this is opt-in.
+   *
+   * Sticky: the setting persists on the context until explicitly changed, and a
+   * completion call that omits this property leaves both the setting and any stored
+   * snapshot untouched (so e.g. a title-generation call in between chat turns is
+   * harmless). Pass `'off'` to disable AND free the stored snapshot.
+   */
+  kv_checkpoint?: 'off' | 'memory'
+
   emit_partial_completion: boolean
 }
 

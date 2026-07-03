@@ -1027,6 +1027,27 @@ namespace rnllama_jsi {
 
                 parseCompletionParams(runtime, params, ctx);
 
+                // Opt-in KV reuse: kv_checkpoint = 'off' | 'memory'. Sticky: only an
+                // explicit property changes the state, so an unrelated call that omits it
+                // (e.g. title generation) can't silently destroy the conversation
+                // checkpoint. Handled here rather than in parseCompletionParams so the
+                // queued/parallel path never mutates checkpoint state from the JS thread,
+                // and this runs safely behind throwIfContextBusy.
+                if (params.hasProperty(runtime, "kv_checkpoint") &&
+                    params.getProperty(runtime, "kv_checkpoint").isString()) {
+                    // Non-string values (incl. an explicit `undefined` from JS spreads)
+                    // count as omitted, per the sticky contract in types.ts.
+                    const std::string kvCheckpoint = getPropertyAsString(runtime, params, "kv_checkpoint", "off");
+                    if (kvCheckpoint == "memory") {
+                        ctx->completion->kv_checkpoint_enabled = true;
+                    } else {
+                        // Disabling must also reclaim the snapshot blob (~54-114 MB on
+                        // hybrid-SSM), not just stop reading it.
+                        ctx->completion->kv_checkpoint_enabled = false;
+                        ctx->completion->dropKvCheckpoint();
+                    }
+                }
+
                 std::vector<std::string> mediaPaths;
                 if (params.hasProperty(runtime, "media_paths")) {
                     jsi::Array paths = params.getProperty(runtime, "media_paths").asObject(runtime).asArray(runtime);

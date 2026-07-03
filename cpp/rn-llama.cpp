@@ -633,6 +633,9 @@ void llama_rn_context::clearCache(bool clear_data) {
     if (completion != nullptr) {
         completion->embd.clear();
         completion->n_past = 0;
+        // Drop the prompt-boundary snapshot so a new chat can't restore one from the
+        // previous conversation.
+        completion->dropKvCheckpoint();
         LOG_INFO("Cache cleared and completion state reset (clear_data=%s)", clear_data ? "true" : "false");
     } else {
         LOG_INFO("Cache cleared (clear_data=%s)", clear_data ? "true" : "false");

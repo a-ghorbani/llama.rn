@@ -55,7 +55,11 @@ namespace rnllama_jsi {
         if (null_token_iter != ctx->completion->embd.end()) {
             ctx->completion->embd.resize(std::distance(ctx->completion->embd.begin(), null_token_iter));
         }
-        
+
+        // A loaded session is a different conversation; drop any prompt-boundary snapshot
+        // (and pending capture) so it can't be restored across unrelated sessions.
+        ctx->completion->dropKvCheckpoint();
+
         const std::string text = rnllama::tokens_to_str(ctx->ctx, ctx->completion->embd.cbegin(), ctx->completion->embd.cend());
         
         jsi::Object result(runtime);

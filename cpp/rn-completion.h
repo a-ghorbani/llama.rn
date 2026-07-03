@@ -7,6 +7,7 @@
 #include "nlohmann/json.hpp"
 #include "chat.h"
 #include "speculative.h"
+#include "rn-kv-checkpoint.hpp"
 #include <deque>
 
 using json = nlohmann::ordered_json;
@@ -69,6 +70,31 @@ struct llama_rn_context_completion {
     llama_pos n_past = 0;
     size_t n_remain = 0;
     std::vector<llama_token> embd;
+    // How loadPrompt resolved the KV cache this turn. Reset to NONE at the top of
+    // loadPrompt and overwritten in its text branch; multimodal and early-exit turns
+    // therefore report NONE. Read by tests to classify reuse/restore/wipe/cold behavior.
+    enum class ReuseAction { NONE = 0, COLD, NORMAL_REUSE, RESTORE, WIPE };
+    ReuseAction last_reuse_action = ReuseAction::NONE;
+    // Opt-in in-memory checkpoint restore. When enabled, the prompt-boundary state is
+    // snapshotted at the end of each turn's prefill; on a later turn where mid-sequence
+    // seq_rm would fail (recurrent/hybrid), the boundary checkpoint is restored instead
+    // of wiping the whole cache, then the diverged tail is reprocessed forward. Default
+    // off -> byte-identical to before. Set from the `kv_checkpoint` param ('off'|'memory').
+    bool kv_checkpoint_enabled = false;
+    KvCheckpoint kv_checkpoint;
+    // Per-turn capture handshake: loadPrompt records the prompt boundary; the prefill
+    // decode loop in nextToken snapshots the state once it reaches that boundary.
+    bool kv_checkpoint_save_pending = false;
+    // Whether this backend can serialize per-seq state (computed in loadPrompt). Passed
+    // to KvCheckpoint::save so it refuses on a backend that can't round-trip the blob.
+    bool kv_checkpoint_backend_ok = true;
+    llama_pos kv_checkpoint_pending_pos = 0;
+    std::vector<llama_token> kv_checkpoint_pending_tokens;
+    // Cancel this turn's pending capture (frees the pending prompt copy); the stored
+    // snapshot is kept -- it persists across turns by design.
+    void cancelKvCheckpointSave();
+    // Drop the stored snapshot and cancel any pending capture, releasing both buffers.
+    void dropKvCheckpoint();
     bool incomplete = false;
     bool context_full = false;
     bool truncated = false;
@@ -106,7 +132,7 @@ struct llama_rn_context_completion {
     void rewind();
     bool initSampling();
     void truncatePrompt(std::vector<llama_token> &prompt_tokens);
-    void loadPrompt(const std::vector<std::string> &media_paths);
+    void loadPrompt(const std::vector<std::string> &media_paths, bool allow_kv_checkpoint = true);
     void beginCompletion();
     void beginCompletion(int chat_format, common_reasoning_format reasoning_format, const std::string &generation_prompt = "", const std::string &chat_parser = "");
     void endCompletion();

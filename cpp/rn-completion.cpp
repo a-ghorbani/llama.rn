@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <cctype>
 #include <limits>
 
 // Include multimodal support
@@ -55,12 +56,26 @@ void llama_rn_context_completion::rewind() {
     incomplete = false;
     n_remain = 0;
     n_past = 0;
+    // Per-turn checkpoint capture handshake (the snapshot itself persists across turns).
+    cancelKvCheckpointSave();
     parent_ctx->params.sampling.n_prev = parent_ctx->n_ctx;
     if (parent_ctx->isVocoderEnabled()) {
         parent_ctx->tts_wrapper->audio_tokens.clear();
         parent_ctx->tts_wrapper->next_token_uses_guide_token = true;
         parent_ctx->tts_wrapper->guide_tokens.clear();
     }
+}
+
+void llama_rn_context_completion::cancelKvCheckpointSave() {
+    kv_checkpoint_save_pending = false;
+    kv_checkpoint_pending_pos = 0;
+    // Can hold a full prompt copy; swap-clear so it is actually freed.
+    std::vector<llama_token>().swap(kv_checkpoint_pending_tokens);
+}
+
+void llama_rn_context_completion::dropKvCheckpoint() {
+    kv_checkpoint.invalidate();
+    cancelKvCheckpointSave();
 }
 
 bool llama_rn_context_completion::initSampling() {
@@ -91,10 +106,19 @@ void llama_rn_context_completion::truncatePrompt(std::vector<llama_token> &promp
 
     truncated = true;
     prompt_tokens = new_tokens;
+
+    // Truncation renumbers token positions, so any prompt-boundary checkpoint captured
+    // before the shift now has stale positions. Drop it.
+    dropKvCheckpoint();
 }
 
-void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &media_paths) {
+void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &media_paths, bool allow_kv_checkpoint) {
     bool has_media = !media_paths.empty();
+    // Checkpointing only makes sense for chat completion turns; embedding()/rerank()
+    // pass allow_kv_checkpoint=false so their throwaway prompts neither pay the
+    // serialization cost nor overwrite the conversation checkpoint.
+    const bool ckpt_active = kv_checkpoint_enabled && allow_kv_checkpoint;
+    last_reuse_action = ReuseAction::NONE;
 
     // Check if this is an encoder-decoder model (like T5)
     const bool is_enc_dec = llama_model_has_encoder(parent_ctx->model);
@@ -107,13 +131,7 @@ void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &med
         text_tokens = ::common_tokenize(parent_ctx->ctx, parent_ctx->params.prompt, add_bos || is_enc_dec, true);
         num_prompt_tokens = text_tokens.size();
 
-        // LOG tokens
-        std::stringstream ss;
-        ss << "\n" << __func__ << ": prompt_tokens = ";
-        for (auto& token : text_tokens) {
-            ss << token << " ";
-        }
-        LOG_INFO("%s\n", ss.str().c_str());
+        LOG_VERBOSE("prompt tokenized, n_tokens: %zu", num_prompt_tokens);
 
         if (parent_ctx->params.n_keep < 0) {
             parent_ctx->params.n_keep = (int)num_prompt_tokens;
@@ -142,24 +160,89 @@ void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &med
         n_past = is_enc_dec ? 0 : find_common_prefix_length(embd, text_tokens);
 
         embd = text_tokens;
-        if (n_past == num_prompt_tokens) {
+        // INVARIANT: the decode loop must reprocess at least one token to produce fresh
+        // logits, so n_past must always end strictly < embd.size(). This n_past-- enforces
+        // the floor when the new prompt is a full prefix of the cache; the restore path
+        // inherits it from its boundary_pos <= n_past_matched gate, since after this
+        // decrement n_past_matched is always <= num_prompt_tokens - 1.
+        if (n_past == (llama_pos)num_prompt_tokens) {
             // we have to evaluate at least 1 token to generate logits.
             n_past--;
         }
 
         // Manage KV cache
         auto * kv = llama_get_memory(parent_ctx->ctx);
-        bool cache_remove_success = llama_memory_seq_rm(kv, 0, n_past, -1);
+        const int n_past_matched = n_past;
 
-        // For hybrid models (LFM-2, Granite, Mamba, etc.), partial cache removal may fail
-        // In that case, do a full cache clear to prevent contamination
+        // Classify how the cache was resolved this turn (for tests/observability).
+        // The restore/wipe branches below override this default.
+        last_reuse_action = (n_past_matched > 0)
+            ? ReuseAction::NORMAL_REUSE
+            : ReuseAction::COLD;
+
+        // When the snapshot covers strictly more of the new prompt than the live cache
+        // does, restore it up front instead of continuing from the cache. This is what
+        // keeps the checkpoint usable after embedding()/rerank() interleave a throwaway
+        // prompt on the same context: they clear the cache and clobber embd, so the
+        // common prefix above is ~0, but the snapshot still holds the conversation.
+        // Safety rests on is_prefix_of alone -- the blob is self-contained and restore()
+        // replaces the whole sequence; boundary_pos < num_prompt_tokens preserves the
+        // reprocess-at-least-one-token floor.
+        bool need_seq_rm = true;
+        if (ckpt_active && kv_checkpoint.valid &&
+            kv_checkpoint.boundary_pos > n_past_matched &&
+            kv_checkpoint.boundary_pos < (llama_pos)num_prompt_tokens &&
+            kv_checkpoint.is_prefix_of(text_tokens)) {
+            if (kv_checkpoint.restore(parent_ctx->ctx, 0)) {
+                n_past = kv_checkpoint.boundary_pos;
+                need_seq_rm = false; // restore replaced the sequence with exactly [0, boundary_pos)
+                last_reuse_action = ReuseAction::RESTORE;
+                LOG_VERBOSE("[REUSE] restored checkpoint at pos %d (live cache matched %d), reprocessing %zu tail tokens",
+                    (int)kv_checkpoint.boundary_pos, n_past_matched, text_tokens.size() - (size_t)n_past);
+            } else {
+                // set_data clears the destination sequence before writing, so a failed
+                // restore leaves it empty -- the live-cache prefix is gone too and full
+                // reprocess is the only safe continuation.
+                kv_checkpoint.invalidate();
+                llama_memory_clear(kv, false);
+                n_past = 0;
+                need_seq_rm = false;
+                last_reuse_action = ReuseAction::WIPE;
+                LOG_WARNING("[REUSE] checkpoint restore failed; full wipe, reprocessing all %zu tokens", text_tokens.size());
+            }
+        }
+
+        bool cache_remove_success = !need_seq_rm || llama_memory_seq_rm(kv, 0, n_past, -1);
+
+        // For hybrid/recurrent models (LFM-2, Granite, Mamba, etc.), partial cache
+        // removal may fail because recurrent state cannot be rewound in place.
         if (!cache_remove_success) {
-            LOG_WARNING("Partial cache removal failed (likely hybrid/recurrent model), doing full cache clear");
-            llama_memory_clear(kv, false);
-            embd.clear();
-            n_past = 0;
-            // Re-assign all tokens to embd since we cleared everything
-            embd = text_tokens;
+            // Prefer restoring a prompt-boundary snapshot over wiping the whole cache.
+            // Eligible only when the snapshot sits at or before the divergence point and
+            // its tokens are a prefix of the new prompt; restore() replaces the sequence
+            // with [0, boundary_pos), then the decode loop reprocesses the diverged tail.
+            bool restored = false;
+            if (ckpt_active && kv_checkpoint.valid &&
+                kv_checkpoint.boundary_pos <= n_past_matched &&
+                kv_checkpoint.is_prefix_of(text_tokens)) {
+                if (kv_checkpoint.restore(parent_ctx->ctx, 0)) {
+                    n_past = kv_checkpoint.boundary_pos;
+                    embd = text_tokens; // host mirror; decode loop reprocesses [n_past, end)
+                    restored = true;
+                    last_reuse_action = ReuseAction::RESTORE;
+                    LOG_VERBOSE("[REUSE] restored checkpoint at pos %d, reprocessing %zu tail tokens",
+                        (int)kv_checkpoint.boundary_pos, text_tokens.size() - (size_t)n_past);
+                } else {
+                    kv_checkpoint.invalidate();
+                }
+            }
+            if (!restored) {
+                last_reuse_action = ReuseAction::WIPE;
+                LOG_WARNING("[REUSE] partial cache removal failed; full wipe, reprocessing all %zu tokens", text_tokens.size());
+                llama_memory_clear(kv, false);
+                n_past = 0;
+                embd = text_tokens;
+            }
         }
 
         LOG_VERBOSE("prompt ingested, n_past: %d, cached: %s, to_eval: %s",
@@ -167,6 +250,80 @@ void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &med
             tokens_to_str(parent_ctx->ctx, embd.cbegin(), embd.cbegin() + n_past).c_str(),
             tokens_to_str(parent_ctx->ctx, embd.cbegin() + n_past, embd.cend()).c_str()
         );
+
+        // Schedule a refresh of the prompt-boundary checkpoint. The snapshot itself is
+        // taken later, once the prefill decode loop (nextToken) reaches the boundary.
+        //
+        // Pin the boundary just before the trailing generation-prompt scaffold (the run of
+        // control/whitespace tokens the chat template appends after the conversation
+        // history, e.g. `<|im_start|>assistant\n<think>\n\n</think>\n\n`). On the next turn
+        // that scaffold is re-rendered differently (history strips the empty <think>), so a
+        // checkpoint pinned at the full prompt would sit past the divergence and be rejected
+        // when restoring. Trimming it keeps the boundary a prefix of subsequent turns. This
+        // is a generic "exclude the generation tail" heuristic; over-trimming only reduces
+        // reuse, and restore is independently guarded by the prefix + boundary checks.
+        if (ckpt_active && !is_enc_dec && num_prompt_tokens > 0) {
+            // Only checkpoint when it can actually be used and the backend can serialize
+            // per-seq state:
+            //   - arch: recurrent or hybrid only. Pure-attention models never wipe (seq_rm
+            //     always succeeds), so they never reach the restore path and a snapshot is
+            //     just wasted memory (~54-114 MB on hybrid-SSM).
+            //   - no sliding-window attention. A pure-SWA model's seq_rm returns true, so it
+            //     never reaches the restore path anyway; but a hybrid+SWA model (e.g. an LFM2
+            //     GGUF with a sliding window) DOES reach it via its recurrent layers, and a
+            //     FLAGS_NONE snapshot of an SWA layer only holds the cells still inside the
+            //     window. Restoring [0, boundary_pos) would then trust attention state whose
+            //     early positions were already evicted -- silently wrong output once the
+            //     conversation outgrows the window. llama.cpp's server validates SWA coverage
+            //     (pos_min_thold) before reuse; we lack that check, so we refuse the snapshot
+            //     and fall back to a correct full wipe. Costs reuse on hybrid+SWA models,
+            //     never correctness. (No-op for LFM2/Qwen3.5 today: all have n_swa == 0.)
+            //   - backend: OpenCL with kv_unified==false or flash-attn enabled cannot
+            //     round-trip the state blob.
+            const bool ckpt_arch_ok = (llama_model_is_recurrent(parent_ctx->model) ||
+                                       llama_model_is_hybrid(parent_ctx->model)) &&
+                                      llama_model_n_swa(parent_ctx->model) == 0;
+            kv_checkpoint_backend_ok = true;
+#ifdef LM_GGML_USE_OPENCL
+            for (const auto &dev_info : parent_ctx->llama_init->model()->devices) {
+                auto dev = dev_info.dev;
+                if (dev == nullptr) continue;
+                if (strncmp(lm_ggml_backend_dev_name(dev), "GPUOpenCL", 9) == 0 &&
+                    (!parent_ctx->params.kv_unified ||
+                     parent_ctx->params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED)) {
+                    kv_checkpoint_backend_ok = false;
+                    break;
+                }
+            }
+#endif
+            if (!ckpt_arch_ok || !kv_checkpoint_backend_ok) {
+                // Not eligible: make sure no stale snapshot or pending capture lingers.
+                dropKvCheckpoint();
+            } else {
+                const llama_vocab * ckpt_vocab = llama_model_get_vocab(parent_ctx->model);
+                llama_pos boundary = (llama_pos)num_prompt_tokens;
+                while (boundary > 0) {
+                    const llama_token t = embd[boundary - 1];
+                    const llama_token_attr attr = llama_vocab_get_attr(ckpt_vocab, t);
+                    // Special/added tokens (role markers like <|im_start|>, reasoning tags like
+                    // <think>/</think>) carry CONTROL or USER_DEFINED attrs; the scaffold also has
+                    // whitespace glue between them.
+                    const bool is_special = (attr & (LLAMA_TOKEN_ATTR_CONTROL | LLAMA_TOKEN_ATTR_USER_DEFINED)) != 0;
+                    std::string piece = common_token_to_piece(parent_ctx->ctx, t);
+                    const bool is_ws = piece.empty() ||
+                        std::all_of(piece.begin(), piece.end(), [](unsigned char c){ return std::isspace(c); });
+                    if (is_special || is_ws) {
+                        boundary--;
+                    } else {
+                        break;
+                    }
+                }
+                if (boundary <= 0) boundary = (llama_pos)num_prompt_tokens; // all-scaffold: don't trim
+                kv_checkpoint_pending_tokens = embd; // full prompt; save() uses [0, boundary)
+                kv_checkpoint_pending_pos = boundary;
+                kv_checkpoint_save_pending = true;
+            }
+        }
     } else {
         // Multimodal path - process all media paths
         processMedia(parent_ctx->params.prompt, media_paths);
@@ -212,12 +369,12 @@ void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &med
         embd.emplace_back(decode_bos);
         common_sampler_accept(ctx_sampling, decode_bos, false);
 
-        LOG_INFO("[DEBUG] T5 encoding complete, added decoder BOS token: %d", decode_bos);
+        LOG_VERBOSE("T5 encoding complete, added decoder BOS token: %d", decode_bos);
     }
 
     has_next_token = true;
 
-    LOG_INFO("[DEBUG] Input processed: n_past=%d, embd.size=%zu, num_prompt_tokens=%zu, has_media=%d",
+    LOG_VERBOSE("Input processed: n_past=%d, embd.size=%zu, num_prompt_tokens=%zu, has_media=%d",
             n_past, embd.size(), num_prompt_tokens, has_media ? 1 : 0);
 }
 
@@ -239,6 +396,16 @@ void llama_rn_context_completion::beginCompletion(int chat_format, common_reason
 
 void llama_rn_context_completion::endCompletion() {
     is_predicting = false;
+    // The last sampled token is pushed to embd but only decoded by the NEXT nextToken
+    // call, so when generation ends on a stop word or n_predict exhaustion it was never
+    // fed to the model. Trim it (mirroring the interrupt path): if it stayed in embd,
+    // next-turn prefix reuse could match through it and skip its decode, leaving a KV
+    // hole (pure attention) or a missing state update (recurrent) at that position.
+    // n_past == 0 means nothing was decoded this turn (early error, context_full);
+    // embd still mirrors the untouched cache from the previous turn -- keep it.
+    if (n_past > 0 && n_past < (llama_pos)embd.size()) {
+        embd.resize(n_past);
+    }
 }
 
 bool llama_rn_context_completion::shouldUseMTP() const {
@@ -536,6 +703,10 @@ completion_token_output llama_rn_context_completion::nextToken()
         n_past -= n_discard;
         truncated = true;
 
+        // The shift renumbered positions; any prompt-boundary checkpoint is now stale.
+        // Drop it and cancel a pending capture for this turn.
+        dropKvCheckpoint();
+
         LOG_VERBOSE("context shifted, new n_past: %d, new size: %d", n_past, embd.size());
     }
 
@@ -547,6 +718,18 @@ completion_token_output llama_rn_context_completion::nextToken()
         if (n_eval > parent_ctx->params.n_batch)
         {
             n_eval = parent_ctx->params.n_batch;
+        }
+        // Cap this batch at the checkpoint boundary so the cache lands on exactly
+        // [0, boundary) at a batch edge -- a clean point to snapshot before decoding
+        // the rest of the prompt.
+        if (kv_checkpoint_enabled && kv_checkpoint_save_pending &&
+            n_past < kv_checkpoint_pending_pos &&
+            n_past + n_eval > (int)kv_checkpoint_pending_pos)
+        {
+            // Land exactly on the boundary so the snapshot covers [0, pending_pos).
+            // (No `tg` reset needed: the cap only fires when the pre-cap n_eval was > 1,
+            // so `tg` was already false; and `tg` is recomputed next iteration anyway.)
+            n_eval = (int)kv_checkpoint_pending_pos - n_past;
         }
         if (llama_decode(parent_ctx->ctx, llama_batch_get_one(&embd[n_past], n_eval)))
         {
@@ -560,6 +743,48 @@ completion_token_output llama_rn_context_completion::nextToken()
             return result;
         }
         n_past += n_eval;
+
+        // Snapshot the prompt-boundary checkpoint the moment the cache covers exactly
+        // the trimmed boundary [0, pending_pos); the cap above makes n_past land on it.
+        //
+        // If entry n_past was already >= pending_pos (a high-reuse turn where the common
+        // prefix or a prior restore already reached past the trimmed boundary), the cap
+        // never fires and n_past rolls forward to the full prompt length, including the
+        // trailing generation scaffold. get_data_ext serializes the whole sequence and
+        // recurrent state cannot be trimmed back, so a snapshot here would bake the scaffold
+        // in; next turn the scaffold re-renders differently, is_prefix_of fails, and restore
+        // is rejected. So only save on an exact boundary match; on overshoot keep the
+        // existing (shorter but still valid-prefix) checkpoint.
+        if (kv_checkpoint_enabled && kv_checkpoint_save_pending &&
+            n_past >= kv_checkpoint_pending_pos && kv_checkpoint_pending_pos > 0) {
+            if (n_past == kv_checkpoint_pending_pos) {
+                // Cheap sanity check the token-prefix validation cannot provide: the
+                // cache must actually end at n_past, or embd and the cache have drifted
+                // and the blob would misrepresent what it claims to cover. A stale prior
+                // snapshot is then equally suspect, so drop everything.
+                const llama_pos cache_end =
+                    llama_memory_seq_pos_max(llama_get_memory(parent_ctx->ctx), 0) + 1;
+                if (cache_end != n_past) {
+                    LOG_WARNING("[REUSE] skip checkpoint save: cache end %d != n_past %d; dropping checkpoint",
+                        (int)cache_end, (int)n_past);
+                    dropKvCheckpoint();
+                } else if (kv_checkpoint.save(parent_ctx->ctx, 0, kv_checkpoint_pending_tokens,
+                                              n_past, kv_checkpoint_backend_ok)) {
+                    LOG_VERBOSE("[REUSE] saved prompt-boundary checkpoint at %d tokens (%zu bytes)",
+                        (int)kv_checkpoint.boundary_pos, kv_checkpoint.data.size());
+                } else {
+                    kv_checkpoint.invalidate();
+                }
+            } else {
+                // Overshoot: cache holds the generation scaffold past the trimmed boundary.
+                // Do NOT overwrite a valid checkpoint with an un-trimmed one (it would fail
+                // is_prefix_of next turn). Leave any existing checkpoint intact.
+                LOG_VERBOSE("[REUSE] skip checkpoint save: n_past=%d overshot trimmed boundary=%d "
+                    "(keeping existing checkpoint; un-trimmed snapshot would include the scaffold)",
+                    (int)n_past, (int)kv_checkpoint_pending_pos);
+            }
+            cancelKvCheckpointSave();
+        }
 
         if(is_interrupted) {
             LOG_INFO("Decoding Interrupted");
@@ -760,7 +985,7 @@ std::vector<float> llama_rn_context_completion::embedding(common_params &embd_pa
         throw std::runtime_error("Failed to initialize sampling");
     }
     beginCompletion();
-    loadPrompt({});
+    loadPrompt({}, /* allow_kv_checkpoint = */ false);
     doCompletion();
     endCompletion();
 
@@ -822,7 +1047,7 @@ std::vector<float> llama_rn_context_completion::rerank(const std::string &query,
         try {
             parent_ctx->params.prompt = tokens_to_str(parent_ctx->ctx, rerank_tokens.begin(), rerank_tokens.end());
             initSampling();
-            loadPrompt({}); // No media paths for rerank
+            loadPrompt({}, /* allow_kv_checkpoint = */ false); // No media paths for rerank
             beginCompletion();
             doCompletion();
 

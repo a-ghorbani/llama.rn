@@ -39,15 +39,6 @@ file(GLOB MTMD_MODEL_FILES ${SOURCE_DIR}/tools/mtmd/models/*.cpp)
 file(GLOB COMMON_FILES ${SOURCE_DIR}/common/*.cpp)
 file(GLOB JINJA_FILES ${SOURCE_DIR}/common/jinja/*.cpp)
 
-# Platform-specific source files
-set(SOURCE_FILES_ARCH "")
-set(PLATFORM_SOURCES "")
-
-if(APPLE)
-    # Metal disabled for tests, so no Metal sources needed
-    # set(PLATFORM_SOURCES ${SOURCE_DIR}/ggml-metal.m)
-endif()
-
 # Shared source files for all test executables
 set(RNLLAMA_COMMON_SOURCES
     # Core GGML files
@@ -66,9 +57,6 @@ set(RNLLAMA_COMMON_SOURCES
     ${GGML_CPU_C_FILES}
     ${GGML_CPU_CPP_FILES}
     ${GGML_CPU_AMX_FILES}
-
-    # Platform-specific sources
-    ${PLATFORM_SOURCES}
 
     # Llama files (globbed)
     ${LLAMA_FILES}
@@ -96,71 +84,41 @@ set(RNLLAMA_COMMON_SOURCES
 
     # Model implementations (globbed)
     ${MODEL_FILES}
-
-    # Architecture-specific files
-    ${SOURCE_FILES_ARCH}
 )
 
-# Create test executable
-add_executable(rnllama_tests
-    simple_test.cpp
-    ${RNLLAMA_COMMON_SOURCES}
+# Compile the (large) shared core exactly once as an OBJECT library; every test
+# executable links the same objects, which is byte-equivalent to compiling the
+# sources per-target but ~Nx faster to build.
+add_library(rnllama_test_core OBJECT ${RNLLAMA_COMMON_SOURCES})
+target_include_directories(rnllama_test_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/common/jinja
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/ggml-cpu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/tools/mtmd
 )
-
-# Setup include directories
-target_include_directories(rnllama_tests
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/common
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/common/jinja
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/ggml-cpu
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/tools/mtmd
-)
-
-# Platform-specific linking
 if(APPLE)
-    # Link required frameworks for macOS
-    target_link_libraries(rnllama_tests PRIVATE
+    target_link_libraries(rnllama_test_core INTERFACE
         "-framework Accelerate"
         "-framework Foundation"
     )
 elseif(UNIX AND NOT APPLE)
-    # Link required libraries for Linux
     find_package(Threads REQUIRED)
-    target_link_libraries(rnllama_tests PRIVATE
+    target_link_libraries(rnllama_test_core INTERFACE
         Threads::Threads
         m  # Math library
         dl # Dynamic loading library
     )
 endif()
 
-# Create parallel decoding test executable
-add_executable(parallel_decoding_test
-    parallel_decoding_test.cpp
-    ${RNLLAMA_COMMON_SOURCES}
-)
+# One test executable = one source file + the shared core.
+function(add_rnllama_test name source)
+    add_executable(${name} ${source})
+    target_link_libraries(${name} PRIVATE rnllama_test_core)
+endfunction()
 
-# Setup include directories for parallel decoding test
-target_include_directories(parallel_decoding_test
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/common
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/common/jinja
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/ggml-cpu
-        ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/tools/mtmd
-)
-
-# Platform-specific linking for parallel decoding test
-if(APPLE)
-    target_link_libraries(parallel_decoding_test PRIVATE
-        "-framework Accelerate"
-        "-framework Foundation"
-    )
-elseif(UNIX AND NOT APPLE)
-    find_package(Threads REQUIRED)
-    target_link_libraries(parallel_decoding_test PRIVATE
-        Threads::Threads
-        m
-        dl
-    )
-endif()
+add_rnllama_test(rnllama_tests           simple_test.cpp)             # basic integration
+add_rnllama_test(parallel_decoding_test  parallel_decoding_test.cpp)  # slot manager / queueing
+add_rnllama_test(reuse_test              reuse_test.cpp)              # KV reuse + checkpoint (unit + gated)
+add_rnllama_test(eval_scenarios_test     eval_scenarios_test.cpp)     # transcript eval harness (A-E)
+add_rnllama_test(swa_cache_corruption_test swa_cache_corruption_test.cpp) # KNOWN-RED SWA repro (see README)

@@ -4,6 +4,15 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
 
+# All test executables defined in CMakeLists.txt.
+TARGETS=(
+    rnllama_tests
+    parallel_decoding_test
+    reuse_test
+    eval_scenarios_test
+    swa_cache_corruption_test
+)
+
 echo "=== Building llama.rn C++ Tests ==="
 
 # Create build directory
@@ -23,37 +32,32 @@ fi
 echo "Configuring with CMake..."
 cmake "$SCRIPT_DIR" -DCMAKE_BUILD_TYPE=Release $CMAKE_OSX_SYSROOT
 
-# Build both test executables
+# Build every test executable (the shared core is compiled once).
 echo ""
 echo "Building test executables..."
-echo "Building rnllama_tests..."
-make rnllama_tests -j4
-if [ ! -f "rnllama_tests" ]; then
-    echo "Error: Failed to build rnllama_tests"
-    exit 1
-fi
-echo "✓ rnllama_tests built successfully"
+cmake --build . -j"${JOBS:-4}"
 
-echo "Building parallel_decoding_test..."
-make parallel_decoding_test -j4
-if [ ! -f "parallel_decoding_test" ]; then
-    echo "Error: Failed to build parallel_decoding_test"
-    exit 1
-fi
-echo "✓ parallel_decoding_test built successfully"
+for t in "${TARGETS[@]}"; do
+    if [ ! -f "$t" ]; then
+        echo "Error: Failed to build $t"
+        exit 1
+    fi
+    echo "✓ $t built successfully"
+done
 
 echo ""
 echo "=== Build Successful ==="
 echo ""
 echo "Built executables:"
-echo "  - rnllama_tests (basic integration tests)"
-echo "  - parallel_decoding_test (parallel decoding tests)"
+for t in "${TARGETS[@]}"; do
+    echo "  - $t"
+done
 echo ""
-echo "To run the tests:"
-echo "  cd tests/build"
-echo "  ./rnllama_tests           # Run basic tests"
-echo "  ./parallel_decoding_test  # Run parallel decoding tests"
+echo "To run the default (tiny-model) suite:"
+echo "  ./run_tests.sh"
 echo ""
-echo "Or run both:"
-echo "  ./rnllama_tests && ./parallel_decoding_test"
+echo "Model-gated suites (see tests/README.md):"
+echo "  RNLLAMA_TEST_HYBRID_MODEL=<hybrid/SSM gguf> ./run_tests.sh   # reuse_test checkpoint gates"
+echo "  RNLLAMA_TEST_MODEL=<real chat gguf> ./run_tests.sh           # eval_scenarios_test full eval"
+echo "  RNLLAMA_TEST_SWA_MODEL=<gemma3 gguf> ./run_tests.sh          # SWA repro (KNOWN-RED)"
 echo ""
