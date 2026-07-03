@@ -132,6 +132,15 @@ BENCH_TURNS=6 ./run-local.sh   # longer perf chat
 SKIP_BENCH=1 ./run-local.sh    # behavioral scenarios only (SKIP_EVAL=1 = perf only)
 ```
 
+Each model's full transcript is printed to the terminal and saved to
+`results-local/<model>.txt` (git-ignored).
+
+Note: the app does NOT need to call `clearCache` between chats. A new
+conversation that doesn't extend the cached prefix is rejected by the checkpoint's
+token-prefix guard and reprocessed from scratch (`action=wipe`, no leak) — proven
+by `reuse_test`'s "new-chat (no clearCache) leak gate". `clearCache` is an optional
+explicit reset that also frees the snapshot blob.
+
 For just the perf view of one model: `RNLLAMA_BENCH_VERBOSE=1 ./build/reuse_test
 models/<m>.gguf bench 4` (add `RNLLAMA_BENCH_REALCHAT=1` for a genuine multi-turn
 chat). For just the correctness gates of one model: `./build/reuse_test models/<m>.gguf`

@@ -29,6 +29,8 @@ FILTERS=("$@")
 BENCH_TURNS="${BENCH_TURNS:-4}"
 DEF_IMG1="../third_party/llama.cpp/tools/mtmd/test-1.jpeg"
 DEF_IMG2="../third_party/llama.cpp/media/matmul.png"
+RESULTS="results-local"       # each model's full transcript is also saved here
+mkdir -p "$RESULTS"
 
 shopt -s nullglob
 for m in models/*.gguf; do
@@ -38,24 +40,30 @@ for m in models/*.gguf; do
         match=0; for f in "${FILTERS[@]}"; do [[ "$base" == *"$f"* ]] && match=1; done
         [ "$match" = 1 ] || continue
     fi
-    echo
-    echo "############################## $base ##############################"
+    # Run all of this model's output through one group piped to tee, so it prints
+    # to the terminal AND is saved under results-local/<model>.txt.
+    OUT="$RESULTS/${base%.gguf}.txt"
+    {
+        echo
+        echo "############################## $base ##############################"
 
-    if [ "${SKIP_EVAL:-0}" != 1 ]; then
-        echo "---- BEHAVIORAL (append / edit-no-leak / new-session-no-leak) ----"
-        EVAL_ARGS=("$m" --smoke)
-        stem="${base%.gguf}"; stem="${stem%-Q[0-9]*}"; stem="${stem%-IQ[0-9]*}"
-        mmcands=(models/mmproj-*"${stem}"*.gguf)
-        if [ "${#mmcands[@]}" -gt 0 ]; then
-            EVAL_ARGS+=(--mmproj "${mmcands[0]}" --image "$DEF_IMG1" --image2 "$DEF_IMG2")
+        if [ "${SKIP_EVAL:-0}" != 1 ]; then
+            echo "---- BEHAVIORAL (append / edit-no-leak / new-session-no-leak) ----"
+            EVAL_ARGS=("$m" --smoke)
+            stem="${base%.gguf}"; stem="${stem%-Q[0-9]*}"; stem="${stem%-IQ[0-9]*}"
+            mmcands=(models/mmproj-*"${stem}"*.gguf)
+            if [ "${#mmcands[@]}" -gt 0 ]; then
+                EVAL_ARGS+=(--mmproj "${mmcands[0]}" --image "$DEF_IMG1" --image2 "$DEF_IMG2")
+            fi
+            [ "${WITH_TOOLS:-0}" = 1 ] && EVAL_ARGS+=(--tools)
+            ./build/eval_scenarios_test "${EVAL_ARGS[@]}"
         fi
-        [ "${WITH_TOOLS:-0}" = 1 ] && EVAL_ARGS+=(--tools)
-        ./build/eval_scenarios_test "${EVAL_ARGS[@]}"
-    fi
 
-    if [ "${SKIP_BENCH:-0}" != 1 ]; then
-        echo "---- PERFORMANCE (checkpoint off vs memory, growing chat) ----"
-        RNLLAMA_BENCH_VERBOSE=1 RNLLAMA_BENCH_REALCHAT="${RNLLAMA_BENCH_REALCHAT:-1}" \
-            ./build/reuse_test "$m" bench "$BENCH_TURNS"
-    fi
+        if [ "${SKIP_BENCH:-0}" != 1 ]; then
+            echo "---- PERFORMANCE (checkpoint off vs memory, growing chat) ----"
+            RNLLAMA_BENCH_VERBOSE=1 RNLLAMA_BENCH_REALCHAT="${RNLLAMA_BENCH_REALCHAT:-1}" \
+                ./build/reuse_test "$m" bench "$BENCH_TURNS"
+        fi
+    } 2>&1 | tee "$OUT"
+    echo "   saved -> $OUT"
 done
