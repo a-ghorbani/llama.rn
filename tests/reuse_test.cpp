@@ -320,6 +320,43 @@ static int run_clearcache_leak_test(const char* model_path) {
     return ok ? 0 : 1;
 }
 
+// App-realistic isolation: a new chat WITHOUT an explicit clearCache. Real apps
+// just send a new conversation; the leading chat-template/system prefix matches but
+// the first user message diverges, so the checkpoint (pinned inside chat A) is NOT a
+// prefix of chat B. is_prefix_of must reject it -> the turn WIPEs and reprocesses,
+// with no restore of chat A's state and no leak of its content. This is the guard
+// that makes the feature safe even when the app never calls clearCache. Returns
+// 0 PASS / 1 FAIL / 2 load-fail / 3 skip (pure-attention: no wipe path).
+static int run_newchat_noclear_leak_test(const char* model_path) {
+    std::cout << "\n========== NEW-CHAT (no clearCache) LEAK TEST :: " << model_path << " ==========\n";
+    llama_rn_context ctx;
+    if (!load_chat_ctx(ctx, model_path)) { std::cout << "load failed\n"; return 2; }
+    if (!(llama_model_is_recurrent(ctx.model) || llama_model_is_hybrid(ctx.model))) {
+        std::cout << "  SKIP: pure-attention model never reaches the restore/wipe path.\n";
+        return 3;
+    }
+
+    // Chat A: establish a private fact + a boundary checkpoint. No clearCache after.
+    auto tA = chat_turn(ctx, {{"user", "Remember: my name is Ali and I live in Berlin. Reply just OK."}},
+                        24, /*checkpoint*/true);
+    const bool ckpt_after_A = ctx.completion->kv_checkpoint.valid;
+
+    // Chat B: a genuinely different conversation on the SAME context, no clearCache.
+    // Shares only the template/system prefix, so it diverges at the first user token.
+    auto tB = chat_turn(ctx, {{"user", "Write one sentence about photosynthesis."}},
+                        32, /*checkpoint*/true);
+
+    const bool no_restore = (tB.action != ReuseAction::RESTORE); // stale checkpoint must be rejected
+    const bool no_leak = !contains_word(tB.text, "ali") && !contains_word(tB.text, "berlin");
+    std::cout << "  chatA: checkpoint valid=" << ckpt_after_A << " resp=\"" << tA.text.substr(0, 40) << "\"\n";
+    std::cout << "  chatB (no clearCache): action=" << action_name(tB.action)
+              << " reused=" << tB.reused << " resp=\"" << tB.text.substr(0, 60) << "\"\n";
+    const bool ok = no_restore && no_leak;
+    std::cout << "  LEAK GATE: no_stale_restore=" << no_restore << " no_leak=" << no_leak
+              << "  => " << (ok ? "PASS" : "FAIL") << "\n";
+    return ok ? 0 : 1;
+}
+
 static int run_phaseb_validation(const char* model_path) {
     std::cout << "\n========== KV-CHECKPOINT VALIDATION :: " << model_path << " ==========\n";
     {
@@ -868,6 +905,10 @@ int main(int argc, char** argv) {
         int leak_rc = run_clearcache_leak_test(MODEL);
         if (leak_rc == 2) return 2;
         check("clearCache leak gate", leak_rc == 0);
+
+        int nc_rc = run_newchat_noclear_leak_test(MODEL);
+        if (nc_rc == 2) return 2;
+        if (nc_rc != 3) check("new-chat (no clearCache) leak gate", nc_rc == 0);
 
         int rc = run_phaseb_validation(MODEL);
         if (rc == 2) return 2;
