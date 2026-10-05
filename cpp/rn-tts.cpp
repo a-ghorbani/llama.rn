@@ -2731,6 +2731,9 @@ int llama_rn_context_tts::tryRealtimePrefill(llama_rn_context * main_ctx, int n_
     b.token = nullptr;
     const int rc = llama_decode(main_ctx->ctx, b);
     llama_batch_free(b);
+    if (rc == 2) {
+        return -1;
+    }
     if (rc) {
         LOG_ERROR("tryRealtimePrefill: prefill decode failed (n_rows=%d)", n_rows);
         return -1;
@@ -2848,6 +2851,9 @@ bool llama_rn_context_tts::tryChatterboxPrefill(
     }
     const int rc = llama_decode(main_ctx->ctx, b);
     llama_batch_free(b);
+    if (rc == 2) {
+        return false;
+    }
     if (rc != 0) {
         LOG_ERROR("tryChatterboxPrefill: llama_decode prefill failed");
         return false;

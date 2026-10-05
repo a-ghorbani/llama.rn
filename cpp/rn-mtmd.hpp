@@ -24,6 +24,7 @@ using mtmd_state_recover_fn =
 using mtmd_state_capture_fn =
     std::function<void(const std::vector<llama_token> &, size_t)>;
 using mtmd_state_invalidate_fn = std::function<void(size_t)>;
+using mtmd_aborted_fn = std::function<bool()>;
 
 // MTMD context structure
 struct llama_rn_context_mtmd {
@@ -52,7 +53,9 @@ struct llama_rn_context_mtmd {
     ~llama_rn_context_mtmd();
 
     // Process media
-    void processMedia(
+    // Returns false when an aborted decode stopped it; embd then holds the
+    // committed prefix [0, n_past).
+    bool processMedia(
         llama_context *ctx,
         const std::string &prompt,
         const std::vector<std::string> &media_paths,
@@ -66,7 +69,8 @@ struct llama_rn_context_mtmd {
         int32_t seq_id,  // Sequence ID for parallel slots
         mtmd_state_recover_fn recover = nullptr,
         mtmd_state_capture_fn capture = nullptr,
-        mtmd_state_invalidate_fn invalidate = nullptr
+        mtmd_state_invalidate_fn invalidate = nullptr,
+        mtmd_aborted_fn aborted = nullptr
     );
 
     // Check if multimodal is enabled
@@ -414,7 +418,7 @@ inline mtmd_tokenize_result tokenizeWithMedia(llama_rn_context_mtmd *mtmd_wrappe
     return result;
 }
 
-inline void llama_rn_context_mtmd::processMedia(
+inline bool llama_rn_context_mtmd::processMedia(
     llama_context *ctx,
     const std::string &prompt,
     const std::vector<std::string> &media_paths,
@@ -428,7 +432,8 @@ inline void llama_rn_context_mtmd::processMedia(
     int32_t seq_id,  // Sequence ID for parallel slots
     mtmd_state_recover_fn recover,
     mtmd_state_capture_fn capture,
-    mtmd_state_invalidate_fn invalidate
+    mtmd_state_invalidate_fn invalidate,
+    mtmd_aborted_fn aborted
 ) {
     // Multimodal path
     std::string full_prompt = prompt;
@@ -658,6 +663,12 @@ inline void llama_rn_context_mtmd::processMedia(
             );
             if (res != 0) {
                 mtmd_input_chunks_free(chunks);
+                if (aborted && aborted()) {
+                    embd.assign(all_tokens.begin(), all_tokens.begin() + n_past);
+                    // The chunk identities past n_past were never committed.
+                    bitmap_past_hashes_ref.clear();
+                    return false;
+                }
                 throw std::runtime_error("Failed to evaluate chunks");
             }
             n_past = new_n_past;
@@ -691,6 +702,7 @@ inline void llama_rn_context_mtmd::processMedia(
     // Clean up media resources
     LOG_INFO("[DEBUG] Cleaning up resources");
     mtmd_input_chunks_free(chunks);
+    return true;
 }
 
 inline llama_rn_context_mtmd::llama_rn_context_mtmd(

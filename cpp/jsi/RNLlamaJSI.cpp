@@ -539,6 +539,8 @@ namespace rnllama_jsi {
 
     // Called once the context is out of the registry, so no new task can reach it.
     static void stopForRelease(const ContextRef& ctx) {
+        // Aborts a decode already in flight (see llama_rn_context::abortRequested)
+        ctx->releasing = true;
         if (ctx->completion) {
             ctx->completion->is_interrupted = true;
         }

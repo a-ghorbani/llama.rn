@@ -538,6 +538,70 @@ bool test_completion_generation_timing() {
     }
 }
 
+// A stop must abort the decode in flight (llama abort callback), not wait for
+// the batch to finish, and leave memory and embd at the committed prefix.
+bool test_stop_aborts_prompt_decode() {
+    try {
+        llama_rn_context ctx;
+        if (!setup_completion_context(ctx)) return false;
+
+        std::string prompt;
+        for (int i = 0; i < 40; i++) prompt += "The quick brown fox jumps over the lazy dog. ";
+
+        std::vector<std::string> empty_media;
+        ctx.completion->rewind();
+        if (!ctx.completion->initSampling()) return false;
+        ctx.params.prompt = prompt;
+        ctx.completion->loadPrompt(empty_media);
+        ctx.completion->beginCompletion();
+        if (ctx.completion->num_prompt_tokens <= (size_t) ctx.params.n_batch) {
+            std::cout << "Prompt must span more than one batch" << std::endl;
+            return false;
+        }
+
+        // What stopCompletion does while the prompt is being decoded
+        ctx.completion->is_interrupted = true;
+        ctx.completion->doCompletion();
+
+        auto * mem = llama_get_memory(ctx.ctx);
+        const llama_pos n_past = ctx.completion->n_past;
+        const llama_pos pos_max = llama_memory_seq_pos_max(mem, 0);
+        const bool ok = !ctx.completion->has_next_token &&
+            n_past == 0 &&
+            ctx.completion->embd.size() == (size_t) n_past &&
+            pos_max < n_past;
+        ctx.completion->endCompletion();
+        if (!ok) {
+            std::cout << "Expected an aborted decode at the committed prefix, got n_past=" << n_past
+                      << " embd=" << ctx.completion->embd.size() << " pos_max=" << pos_max
+                      << " has_next_token=" << ctx.completion->has_next_token << std::endl;
+            return false;
+        }
+
+        // The context stays usable after the abort
+        if (run_classic_completion(ctx, prompt, 4) <= 0) {
+            std::cout << "Completion after an aborted decode generated no tokens" << std::endl;
+            return false;
+        }
+
+        // Release aborts a decode too, even outside a completion
+        ctx.releasing = true;
+        const bool aborts_on_release = ctx.abortRequested();
+        ctx.releasing = false;
+        if (!aborts_on_release || ctx.abortRequested()) {
+            std::cout << "abortRequested() must follow releasing" << std::endl;
+            return false;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        std::cout << "Exception: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cout << "Unknown exception" << std::endl;
+        return false;
+    }
+}
+
 int main() {
     std::cout << "Starting rnllama API tests..." << std::endl;
     std::cout << "Using test model: ../tiny-random-llama.gguf" << std::endl;
@@ -551,6 +615,7 @@ int main() {
     results.run_test("Completion", test_completion());
     results.run_test("Completion Generation Timing", test_completion_generation_timing());
     results.run_test("Completion Probabilities Reset Between Completions", test_completion_probabilities_reset_between_completions());
+    results.run_test("Stop Aborts Prompt Decode", test_stop_aborts_prompt_decode());
     results.run_test("Logit Bias Forces Token", test_logit_bias_forces_token());
     results.run_test("n_probs Post-Sampling vs Raw", test_n_probs_post_sampling_vs_raw());
     results.run_test("Graceful Context Init Failure", test_context_init_failure_is_graceful());
