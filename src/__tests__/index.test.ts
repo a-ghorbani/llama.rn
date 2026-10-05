@@ -1,6 +1,7 @@
 import { NativeModules } from 'react-native'
 import { initLlama, releaseAllLlama } from '..'
 import type {
+  FormattedChatResult,
   JinjaFormattedChatResult,
   NativeCompletionResult,
   TokenData,
@@ -11,12 +12,19 @@ jest.mock('..', () => require('../../jest/mock'))
 Math.random = () => 0.5
 
 let llamaQueueCompletionMock: jest.Mock
+let llamaCompletionMock: jest.Mock
+let llamaStopCompletionMock: jest.Mock
 
 beforeAll(async () => {
   await NativeModules.RNLlama.install()
-  llamaQueueCompletionMock = (global as typeof globalThis & {
+  const mocks = global as typeof globalThis & {
     llamaQueueCompletion: jest.Mock
-  }).llamaQueueCompletion
+    llamaCompletion: jest.Mock
+    llamaStopCompletion: jest.Mock
+  }
+  llamaQueueCompletionMock = mocks.llamaQueueCompletion
+  llamaCompletionMock = mocks.llamaCompletion
+  llamaStopCompletionMock = mocks.llamaStopCompletion
 })
 
 test('LoRA and speculative inputs are passed through', async () => {
@@ -611,4 +619,49 @@ test('Decision API', async () => {
   expect((await promise).answers.mood.type).toBe('score')
 
   await context.release()
+})
+
+test('a stop during prompt formatting is applied after llamaCompletion', async () => {
+  const llamaCompletion = llamaCompletionMock
+  const llamaStopCompletion = llamaStopCompletionMock
+  const context = await initLlama({ model: 'test.gguf' })
+  const messages = [{ role: 'user', content: 'Hi' }]
+  const formattedResult: FormattedChatResult = {
+    type: 'llama-chat',
+    prompt: 'Hi',
+    has_media: false,
+  }
+  const getFormattedChat = jest.spyOn(context, 'getFormattedChat')
+
+  // Hold formatting open so stopCompletion() lands before llamaCompletion,
+  // whose native rewind() clears the stop flag
+  let finishFormatting = () => {}
+  getFormattedChat.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishFormatting = () => resolve(formattedResult)
+      }),
+  )
+  llamaCompletion.mockClear()
+  llamaStopCompletion.mockClear()
+
+  const pending = context.completion({ messages })
+  await context.stopCompletion()
+  expect(llamaCompletion).not.toHaveBeenCalled()
+  finishFormatting()
+  await pending
+
+  expect(llamaCompletion).toHaveBeenCalledTimes(1)
+  expect(llamaStopCompletion).toHaveBeenCalledTimes(2)
+  expect(llamaStopCompletion.mock.invocationCallOrder[1]).toBeGreaterThan(
+    llamaCompletion.mock.invocationCallOrder[0]!,
+  )
+
+  // A stop from before this completion started does not carry over
+  getFormattedChat.mockResolvedValueOnce(formattedResult)
+  llamaStopCompletion.mockClear()
+  await context.completion({ messages })
+  expect(llamaStopCompletion).not.toHaveBeenCalled()
+
+  getFormattedChat.mockRestore()
 })

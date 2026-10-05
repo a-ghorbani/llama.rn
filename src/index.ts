@@ -421,6 +421,10 @@ export class LlamaSpeaker {
 export class LlamaContext {
   id: number
 
+  // Counts stopCompletion() calls, so completion() can tell that one arrived
+  // while it was still formatting the prompt
+  private stopRequests = 0
+
   gpu: boolean = false
 
   reasonNoGPU: string = ''
@@ -912,6 +916,7 @@ export class LlamaContext {
     params: CompletionParams & { speaker?: string | LlamaSpeaker },
     callback?: (data: TokenData) => void,
   ): Promise<NativeCompletionResult> {
+    const stopRequestsAtStart = this.stopRequests
     const { speaker, ...rest } = params
     const nativeParams: NativeCompletionRequestParams & {
       speakerId?: number
@@ -1000,11 +1005,16 @@ export class LlamaContext {
     if (!nativeParams.prompt && !params.embedding && !nativeParams.media_paths)
       throw new Error('Prompt is required')
 
-    const { llamaCompletion } = getJsi()
-    return llamaCompletion(this.id, nativeParams, callback)
+    const { llamaCompletion, llamaStopCompletion } = getJsi()
+    const result = llamaCompletion(this.id, nativeParams, callback)
+    // llamaCompletion clears the native stop flag, so a stop that arrived
+    // while the prompt was formatted is applied again here.
+    if (this.stopRequests !== stopRequestsAtStart) llamaStopCompletion(this.id)
+    return result
   }
 
   stopCompletion(): Promise<void> {
+    this.stopRequests += 1
     const { llamaStopCompletion } = getJsi()
     return llamaStopCompletion(this.id)
   }
