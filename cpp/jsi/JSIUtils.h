@@ -33,7 +33,6 @@ namespace rnllama_jsi {
     );
 
     // Schedule an async callback on the JS thread with TaskManager tracking.
-    // This ensures releaseContext will wait for all pending callbacks before deletion.
     // The callback receives a bool indicating if it should proceed (false if shutting down).
     void invokeAsyncTracked(
         std::shared_ptr<react::CallInvoker> callInvoker,

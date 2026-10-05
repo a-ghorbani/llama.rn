@@ -9,8 +9,6 @@ using namespace facebook;
 
 namespace rnllama_jsi {
     // Context management functions
-    void addContext(int contextId, long contextPtr);
-    void removeContext(int contextId);
     void setContextLimit(int64_t limit);
 #if defined(__ANDROID__)
     void setAndroidLoadedLibrary(const std::string& name);

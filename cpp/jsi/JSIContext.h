@@ -1,32 +1,42 @@
 #pragma once
 #include "JSINativeHeaders.h"
-#include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace rnllama_jsi {
+    // Registered contexts are reachable only through shared ownership: every task
+    // holds a reference while it runs, and release destroys a context only once
+    // it is the sole owner.
     template<typename T>
     class ContextManager {
     private:
-        std::unordered_map<int, long> contextMap;
+        std::unordered_map<int, std::shared_ptr<T>> contextMap;
         std::mutex contextMutex;
 
     public:
-        void add(int contextId, long contextPtr) {
+        void add(int contextId, std::shared_ptr<T> context) {
             std::lock_guard<std::mutex> lock(contextMutex);
-            contextMap[contextId] = contextPtr;
+            contextMap[contextId] = std::move(context);
         }
 
-        void remove(int contextId) {
-            std::lock_guard<std::mutex> lock(contextMutex);
-            contextMap.erase(contextId);
-        }
-
-        long get(int contextId) {
+        std::shared_ptr<T> take(int contextId) {
             std::lock_guard<std::mutex> lock(contextMutex);
             auto it = contextMap.find(contextId);
-            return (it != contextMap.end()) ? it->second : 0;
+            if (it == contextMap.end()) {
+                return nullptr;
+            }
+            auto context = std::move(it->second);
+            contextMap.erase(it);
+            return context;
+        }
+
+        std::shared_ptr<T> get(int contextId) {
+            std::lock_guard<std::mutex> lock(contextMutex);
+            auto it = contextMap.find(contextId);
+            return (it != contextMap.end()) ? it->second : nullptr;
         }
 
         size_t size() {
@@ -34,39 +44,19 @@ namespace rnllama_jsi {
             return contextMap.size();
         }
 
-        std::vector<std::pair<int, long>> snapshot() {
+        std::vector<std::shared_ptr<T>> takeAll() {
             std::lock_guard<std::mutex> lock(contextMutex);
-            std::vector<std::pair<int, long>> items;
+            std::vector<std::shared_ptr<T>> items;
             items.reserve(contextMap.size());
-            for (const auto& entry : contextMap) {
-                items.push_back(entry);
+            for (auto& entry : contextMap) {
+                items.push_back(std::move(entry.second));
             }
+            contextMap.clear();
             return items;
         }
-        
-        void clear(std::function<void(long)> deleter = nullptr) {
-            // Take a snapshot and clear the map first, then delete objects.
-            // This ensures any concurrent lookups via get() will return 0 (not found)
-            // rather than a dangling pointer while deletion is in progress.
-            std::vector<long> toDelete;
-            {
-                std::lock_guard<std::mutex> lock(contextMutex);
-                if (deleter) {
-                    toDelete.reserve(contextMap.size());
-                    for (auto& pair : contextMap) {
-                        toDelete.push_back(pair.second);
-                    }
-                }
-                contextMap.clear();
-            }
-            // Delete outside the lock to avoid potential deadlocks
-            if (deleter) {
-                for (long ptr : toDelete) {
-                    deleter(ptr);
-                }
-            }
-        }
     };
+
+    using ContextRef = std::shared_ptr<rnllama::llama_rn_context>;
 
     extern ContextManager<rnllama::llama_rn_context> g_llamaContexts;
 }
