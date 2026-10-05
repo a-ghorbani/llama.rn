@@ -79,7 +79,7 @@ struct llama_rn_context_completion {
 
     // Completion state fields
     bool is_predicting = false;
-    bool is_interrupted = false;
+    std::atomic<bool> is_interrupted{false};
     bool has_next_token = false;
     std::string prefill_text;
     std::string generated_text;
@@ -190,6 +190,8 @@ struct llama_rn_context_completion {
     // all — used to recover the last boundary as the cold-ingest frontier).
     std::vector<llama_pos> computeMessageBoundaries(const std::vector<llama_token> &tokens,
                                                     llama_pos min_gap) const;
+    void stopAfterAbortedDecode();
+    void restoreAfterAbortedDecode(llama_memory_t mem);
     void beginCompletion();
     void beginCompletion(int chat_format, common_reasoning_format reasoning_format, const std::string &generation_prompt = "", const std::string &chat_parser = "");
     void endCompletion();
@@ -214,8 +216,8 @@ struct llama_rn_context_completion {
     // Benchmarking methods
     json bench(int pp, int tg, int pl, int nr);
 
-    // Multimodal processing methods
-    void processMedia(
+    // Multimodal processing methods; false when the abort callback stopped it
+    bool processMedia(
       const std::string &prompt,
       const std::vector<std::string> &media_paths
     );

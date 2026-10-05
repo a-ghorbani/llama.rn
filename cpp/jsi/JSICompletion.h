@@ -161,7 +161,7 @@ namespace rnllama_jsi {
         res["draft_tokens_accepted"] = c.num_draft_tokens_accepted;
         res["truncated"] = c.truncated;
         res["context_full"] = c.context_full;
-        res["interrupted"] = c.is_interrupted;
+        res["interrupted"] = static_cast<bool>(c.is_interrupted);
         res["stopped_eos"] = c.stopped_eos;
         res["stopped_word"] = c.stopped_word;
         res["stopped_limit"] = c.stopped_limit;

@@ -610,7 +610,10 @@ void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &med
         );
     } else {
         // Multimodal path - process all media paths
-        processMedia(parent_ctx->params.prompt, media_paths);
+        if (!processMedia(parent_ctx->params.prompt, media_paths)) {
+            stopAfterAbortedDecode();
+            return;
+        }
         num_prompt_tokens = embd.size();
         // Placeholder tokens are not vocab ids; no delimiter scan on media prompts.
         boundary_ckpts.clear();
@@ -634,6 +637,10 @@ void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &med
                 }
 
                 int ret = llama_encode(parent_ctx->ctx, llama_batch_get_one(embd.data() + n_past_batch, n_eval));
+                if (ret == 2) {
+                    stopAfterAbortedDecode();
+                    return;
+                }
                 if (ret < 0) {
                     LOG_ERROR("Failed to encode token batch, code: %d, n_eval: %d, n_past_batch: %d", ret, n_eval, n_past_batch);
                     has_next_token = false;
@@ -677,6 +684,7 @@ void llama_rn_context_completion::beginCompletion(int chat_format, common_reason
     llama_perf_context_reset(parent_ctx->ctx);
     resetGenerationTimings();
     is_predicting = true;
+    parent_ctx->completion_active = true;
 
     current_chat_format = chat_format;
     current_reasoning_format = reasoning_format;
@@ -693,6 +701,65 @@ void llama_rn_context_completion::endCompletion() {
         embd.resize(n_past);
     }
     is_predicting = false;
+    parent_ctx->completion_active = false;
+}
+
+// The abort callback stopped a decode: a stop, not an error. Memory and embd
+// keep only the fully committed prefix [0, n_past) so the next prompt's prefix
+// match never reuses cells a partial batch wrote.
+void llama_rn_context_completion::stopAfterAbortedDecode() {
+    is_interrupted = true;
+    has_next_token = false;
+    if (n_past < 0) {
+        n_past = 0;
+    }
+    auto * mem = llama_get_memory(parent_ctx->ctx);
+    if (llama_model_is_recurrent(parent_ctx->model) || llama_model_is_hybrid(parent_ctx->model)) {
+        restoreAfterAbortedDecode(mem);
+        return;
+    }
+    if (!llama_memory_seq_rm(mem, 0, n_past, -1)) {
+        llama_memory_seq_rm(mem, 0, 0, -1);
+        n_past = 0;
+    }
+    if ((size_t) n_past < embd.size()) {
+        embd.resize(n_past);
+    }
+    LOG_INFO("Decoding interrupted, n_past: %d", n_past);
+}
+
+// A partial graph leaves recurrent state written for only some layers, and with
+// MTP the rollback rows too, so even a seq_rm that succeeds would keep mixed
+// state. Rewind to a snapshot instead. Text-only: on M-RoPE models a token count
+// is not a position, and an abort inside media ingest drops the media hashes.
+void llama_rn_context_completion::restoreAfterAbortedDecode(llama_memory_t mem) {
+    const size_t committed = std::min((size_t) n_past, embd.size());
+    const auto committed_end = embd.begin() + committed;
+    const char * clear_reason = nullptr;
+    int idx = -1;
+    if (!state_cache_enabled) {
+        clear_reason = "state cache off";
+    } else if (std::find(embd.begin(), committed_end, LLAMA_TOKEN_NULL) != committed_end) {
+        clear_reason = "media";
+    } else if ((idx = findStateCheckpoint(embd, committed)) < 0) {
+        clear_reason = "no checkpoint";
+    } else if (!restoreStateCheckpoint((size_t) idx)) {
+        clear_reason = "restore failed";
+    }
+
+    if (clear_reason == nullptr) {
+        const llama_pos k = (llama_pos) state_checkpoints[idx].n_tokens();
+        llama_memory_seq_rm(mem, 0, k, -1);
+        n_past = k;
+        embd.resize(k);
+        LOG_INFO("Decoding interrupted, restored state checkpoint, n_past: %d", n_past);
+        return;
+    }
+    llama_memory_clear(mem, false);
+    clearStateCheckpoints();
+    n_past = 0;
+    embd.clear();
+    LOG_INFO("Decoding interrupted, no usable state checkpoint (%s), cleared memory", clear_reason);
 }
 
 void llama_rn_context_completion::resetGenerationTimings() {
@@ -831,6 +898,11 @@ void llama_rn_context_completion::evalMTPPrompt() {
         }
 
         const int ret = llama_process(parent_ctx->ctx, LLAMA_PROCESS_TYPE_DECODE, spec_batch.get());
+        if (ret == 2) {
+            n_past = (llama_pos) offset;
+            stopAfterAbortedDecode();
+            return;
+        }
         if (ret != 0) {
             // Memory holds only [0, offset); trim embd so a later prefix match
             // can't claim never-decoded cells (mirrors nextToken).
@@ -839,8 +911,12 @@ void llama_rn_context_completion::evalMTPPrompt() {
             throw std::runtime_error("failed to evaluate MTP prompt batch, ret=" + std::to_string(ret));
         }
         if (!common_speculative_process(spec, spec_batch)) {
-            embd.resize(std::min(embd.size(), offset));
             n_past = (llama_pos) offset;
+            if (parent_ctx->abortRequested()) {
+                stopAfterAbortedDecode();
+                return;
+            }
+            embd.resize(std::min(embd.size(), offset));
             throw std::runtime_error("failed to process MTP prompt batch");
         }
 
@@ -925,10 +1001,20 @@ bool llama_rn_context_completion::refillMTPTokens() {
     }
 
     const int ret = llama_process(parent_ctx->ctx, LLAMA_PROCESS_TYPE_DECODE, spec_batch.get());
+    if (ret == 2) {
+        n_past = spec_n_past;
+        stopAfterAbortedDecode();
+        return false;
+    }
     if (ret != 0) {
         throw std::runtime_error("failed to evaluate MTP target batch, ret=" + std::to_string(ret));
     }
     if (!common_speculative_process(spec, spec_batch)) {
+        if (parent_ctx->abortRequested()) {
+            n_past = spec_n_past;
+            stopAfterAbortedDecode();
+            return false;
+        }
         throw std::runtime_error("failed to process MTP target batch");
     }
 
@@ -997,6 +1083,9 @@ completion_token_output llama_rn_context_completion::nextTokenMTP() {
 
     if (spec == nullptr) {
         initMTP();
+        if (!has_next_token) {
+            return result;
+        }
     }
     startGenerationTiming();
 
@@ -1170,6 +1259,10 @@ completion_token_output llama_rn_context_completion::nextToken()
             b.token = nullptr;
             const int rc = llama_decode(parent_ctx->ctx, b);
             llama_batch_free(b);
+            if (rc == 2) {
+                stopAfterAbortedDecode();
+                return result;
+            }
             if (rc) {
                 LOG_ERROR("failed to eval speaker prefix, rows=%d", emb_rows);
                 has_next_token = false;
@@ -1221,6 +1314,10 @@ completion_token_output llama_rn_context_completion::nextToken()
         b.token = nullptr;
         const int rc = llama_decode(parent_ctx->ctx, b);
         llama_batch_free(b);
+        if (rc == 2) {
+            stopAfterAbortedDecode();
+            return result;
+        }
         if (rc) {
             LOG_ERROR("failed to eval talker prefix, rows=%d", rows);
             has_next_token = false;
@@ -1301,6 +1398,10 @@ completion_token_output llama_rn_context_completion::nextToken()
         if (!parent_ctx->tts_wrapper->tryChatterboxPrefill(
                 parent_ctx, text,
                 ref_pcm, ref_n_samples, ref_sr, cfg_weight)) {
+            if (parent_ctx->abortRequested()) {
+                stopAfterAbortedDecode();
+                return result;
+            }
             LOG_ERROR("tryChatterboxPrefill failed");
             has_next_token = false;
             return result;
@@ -1345,6 +1446,10 @@ completion_token_output llama_rn_context_completion::nextToken()
         const int new_past = parent_ctx->tts_wrapper->tryRealtimePrefill(
             parent_ctx, (int) n_past);
         if (new_past < 0) {
+            if (parent_ctx->abortRequested()) {
+                stopAfterAbortedDecode();
+                return result;
+            }
             LOG_ERROR("tryRealtimePrefill failed");
             has_next_token = false;
             return result;
@@ -1435,6 +1540,10 @@ completion_token_output llama_rn_context_completion::nextToken()
             b.token        = nullptr;
             const int rc = llama_decode(parent_ctx->ctx, b);
             llama_batch_free(b);
+            if (rc == 2) {
+                stopAfterAbortedDecode();
+                return result;
+            }
             if (rc) {
                 LOG_ERROR("failed to eval codec_lm TTS embd, n_past: %d", n_past);
                 embd.resize(n_past);
@@ -1469,6 +1578,11 @@ completion_token_output llama_rn_context_completion::nextToken()
                 b.logits[i]    = 1;
             }
             const int rc = llama_decode(parent_ctx->ctx, b);
+            if (rc == 2) {
+                llama_batch_free(b);
+                stopAfterAbortedDecode();
+                return result;
+            }
             if (rc) {
                 llama_batch_free(b);
                 LOG_ERROR("failed to eval continuous TTS prompt, n_eval: %d, n_past: %d",
@@ -1492,7 +1606,12 @@ completion_token_output llama_rn_context_completion::nextToken()
             }
             llama_batch_free(b);
         } else {
-            if (llama_decode(parent_ctx->ctx, llama_batch_get_one(&embd[n_past], n_eval)))
+            const int rc = llama_decode(parent_ctx->ctx, llama_batch_get_one(&embd[n_past], n_eval));
+            if (rc == 2) {
+                stopAfterAbortedDecode();
+                return result;
+            }
+            if (rc)
             {
                 LOG_ERROR("failed to eval, n_eval: %d, n_past: %d, n_threads: %d, embd: %s",
                     n_eval,
@@ -2149,7 +2268,7 @@ json llama_rn_context_completion::bench(int pp, int tg, int pl, int nr) {
     return result_json;
 }
 
-void llama_rn_context_completion::processMedia(
+bool llama_rn_context_completion::processMedia(
     const std::string &prompt,
     const std::vector<std::string> &media_paths
 ) {
@@ -2172,7 +2291,10 @@ void llama_rn_context_completion::processMedia(
     auto invalidate = [this](size_t n) {
         eraseStateCheckpointsAfter(n);
     };
-    parent_ctx->mtmd_wrapper->processMedia(
+    auto aborted = [this]() {
+        return parent_ctx->abortRequested();
+    };
+    return parent_ctx->mtmd_wrapper->processMedia(
         parent_ctx->ctx,
         prompt,
         media_paths,
@@ -2186,7 +2308,8 @@ void llama_rn_context_completion::processMedia(
         0,  // Use sequence ID 0 for non-parallel mode
         recover,
         capture,
-        invalidate
+        invalidate,
+        aborted
     );
 }
 

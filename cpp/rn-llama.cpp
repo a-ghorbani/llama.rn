@@ -128,6 +128,19 @@ void install_ggml_abort_handler() {
     ggml_set_abort_callback(ggml_abort_log_callback);
 }
 
+// Runs per graph node on a compute thread: reads atomics only.
+static bool llama_rn_abort_callback(void *data) {
+    return static_cast<const llama_rn_context *>(data)->abortRequested();
+}
+
+bool llama_rn_context::abortRequested() const {
+    if (releasing.load(std::memory_order_relaxed)) {
+        return true;
+    }
+    return completion_active.load(std::memory_order_relaxed) &&
+        completion->is_interrupted.load(std::memory_order_relaxed);
+}
+
 static const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_F32,
     GGML_TYPE_F16,
@@ -519,6 +532,13 @@ bool llama_rn_context::attachThreadpoolsIfAvailable() {
 }
 
 llama_rn_context::~llama_rn_context() {
+    if (ctx != nullptr) {
+        llama_set_abort_callback(ctx, nullptr, nullptr);
+    }
+    if (completion != nullptr && completion->spec_ctx != nullptr) {
+        llama_set_abort_callback(completion->spec_ctx.get(), nullptr, nullptr);
+    }
+
     // Disable parallel mode first (cleans up slot_manager)
     disableParallelMode();
 
@@ -570,6 +590,7 @@ bool llama_rn_context::loadModel(common_params &params_)
         }
         return false;
     }
+    llama_set_abort_callback(ctx, llama_rn_abort_callback, this);
 
     if (params.speculative.has_dft() &&
         has_speculative_type(params.speculative, COMMON_SPECULATIVE_TYPE_DRAFT_MTP)) {
@@ -713,7 +734,11 @@ llama_context * llama_rn_context::createMTPDraftContext(const common_params &par
     cparams.type_v = params_for_context.speculative.draft.cache_type_v;
     cparams.ctx_other = ctx;
 
-    return llama_init_from_model(model_dft, cparams);
+    llama_context * draft_ctx = llama_init_from_model(model_dft, cparams);
+    if (draft_ctx != nullptr) {
+        llama_set_abort_callback(draft_ctx, llama_rn_abort_callback, const_cast<llama_rn_context *>(this));
+    }
+    return draft_ctx;
 }
 
 

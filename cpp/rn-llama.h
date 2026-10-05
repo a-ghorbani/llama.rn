@@ -222,6 +222,11 @@ struct llama_rn_context {
 
     // Cache management
     void clearCache(bool clear_data = false);
+
+    // Read by the llama abort callback on compute threads; see abortRequested().
+    std::atomic<bool> releasing{false};
+    std::atomic<bool> completion_active{false};
+    bool abortRequested() const;
 };
 
 // Utility functions
