@@ -159,8 +159,7 @@ namespace rnllama_jsi {
                             }
                         }
 
-                        // If we couldn't schedule invokeAsync, finish the task now to prevent
-                        // waitForContext from hanging forever
+                        // If we couldn't schedule invokeAsync, finish the task now
                         if (!invokeScheduled && shouldTrack) {
                             TaskManager::getInstance().finishTask(contextId);
                         }
@@ -188,7 +187,7 @@ namespace rnllama_jsi {
                 callback(shouldProceed);
             });
         } catch (...) {
-            // invokeAsync failed - finish task to prevent waitForContext hanging
+            // invokeAsync failed - finish the task now
             if (shouldTrack) {
                 TaskManager::getInstance().finishTask(contextId);
             }
