@@ -538,6 +538,70 @@ bool test_completion_generation_timing() {
     }
 }
 
+// A stop that lands before the first decode leaves the prompt in embd over an
+// empty KV cache. endCompletion must drop it, or the next run of the same prompt
+// prefix-matches tokens that were never decoded and evaluates only the last one.
+bool test_stop_before_first_decode_keeps_no_cache() {
+    try {
+        llama_rn_context ctx;
+        if (!setup_completion_context(ctx)) return false;
+
+        const std::string prompt = "The quick brown fox jumps over the lazy dog.";
+        std::vector<std::string> empty_media;
+
+        // What stopCompletion does between loadPrompt and the first loop check
+        ctx.completion->rewind();
+        if (!ctx.completion->initSampling()) return false;
+        ctx.params.prompt = prompt;
+        ctx.completion->loadPrompt(empty_media);
+        ctx.completion->beginCompletion();
+        const size_t prompt_tokens = ctx.completion->num_prompt_tokens;
+        if (ctx.completion->n_past != 0 || prompt_tokens < 2) {
+            std::cout << "Expected a cold prompt, got n_past=" << ctx.completion->n_past
+                      << " prompt_tokens=" << prompt_tokens << std::endl;
+            return false;
+        }
+        ctx.completion->is_interrupted = true;
+        ctx.completion->endCompletion();
+        if (!ctx.completion->embd.empty()) {
+            std::cout << "Undecoded prompt left in embd: " << ctx.completion->embd.size() << " tokens" << std::endl;
+            return false;
+        }
+
+        // The same prompt again must be evaluated in full
+        ctx.completion->rewind();
+        if (!ctx.completion->initSampling()) return false;
+        ctx.params.prompt = prompt;
+        ctx.completion->loadPrompt(empty_media);
+        const llama_pos reused = ctx.completion->n_past;
+        ctx.completion->beginCompletion();
+        int generated = 0;
+        while (ctx.completion->has_next_token && generated < 4) {
+            completion_token_output out = ctx.completion->doCompletion();
+            if (out.tok == -1) break;
+            generated++;
+        }
+        ctx.completion->is_interrupted = true;
+        ctx.completion->endCompletion();
+        if (reused != 0) {
+            std::cout << "Rerun reported " << reused << " of " << prompt_tokens
+                      << " prompt tokens as cached, none were decoded" << std::endl;
+            return false;
+        }
+        if (generated <= 0) {
+            std::cout << "Rerun generated no tokens" << std::endl;
+            return false;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        std::cout << "Exception: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cout << "Unknown exception" << std::endl;
+        return false;
+    }
+}
+
 int main() {
     std::cout << "Starting rnllama API tests..." << std::endl;
     std::cout << "Using test model: ../tiny-random-llama.gguf" << std::endl;
@@ -551,6 +615,7 @@ int main() {
     results.run_test("Completion", test_completion());
     results.run_test("Completion Generation Timing", test_completion_generation_timing());
     results.run_test("Completion Probabilities Reset Between Completions", test_completion_probabilities_reset_between_completions());
+    results.run_test("Stop Before First Decode Keeps No Cache", test_stop_before_first_decode_keeps_no_cache());
     results.run_test("Logit Bias Forces Token", test_logit_bias_forces_token());
     results.run_test("n_probs Post-Sampling vs Raw", test_n_probs_post_sampling_vs_raw());
     results.run_test("Graceful Context Init Failure", test_context_init_failure_is_graceful());
