@@ -79,7 +79,7 @@ struct llama_rn_context_completion {
 
     // Completion state fields
     bool is_predicting = false;
-    bool is_interrupted = false;
+    std::atomic<bool> is_interrupted{false};
     bool has_next_token = false;
     std::string prefill_text;
     std::string generated_text;
@@ -193,6 +193,7 @@ struct llama_rn_context_completion {
     void beginCompletion();
     void beginCompletion(int chat_format, common_reasoning_format reasoning_format, const std::string &generation_prompt = "", const std::string &chat_parser = "");
     void endCompletion();
+    void recoverAfterAbortedDecode();
     void resetGenerationTimings();
     void startGenerationTiming();
     void updateGenerationTiming();

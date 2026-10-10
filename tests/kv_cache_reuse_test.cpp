@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cctype>
 
+#include <atomic>
 #include <thread>
 #include <chrono>
 
@@ -2267,6 +2268,142 @@ std::vector<Check> run_state_fidelity_test(const std::string &key, const std::st
     return checks;
 }
 
+// Stop during MTP generation on a recurrent/hybrid model. The stop aborts the
+// target decode of a draft batch; llama_decode then rolls the whole batch back
+// through the per-token rollback rows the aborted graph was writing, and
+// reports success. The state left behind must still match the tokens the
+// completion keeps: score a probe from it and from a cold decode of those tokens.
+std::vector<Check> run_mtp_abort_fidelity_test(const std::string &key, const std::string &path) {
+    std::vector<Check> checks;
+    const std::string tag = " [mtp-abort]";
+    std::cout << "\n===== " << key << tag << ": a stop mid-decode must leave a faithful state =====\n";
+    ChatSim sim;
+    sim.use_mtp = true;
+    if (!sim.load(path, /*n_ctx*/ 2048)) {
+        checks.push_back({key + tag + ": model load", false, "loadModel failed", false});
+        return checks;
+    }
+    if (llama_n_rs_seq(sim.ctx.ctx) == 0) {
+        std::cout << "    no rollback rows (n_rs_seq = 0), nothing to check\n";
+        return checks;
+    }
+    sim.system_prompt = "You are a helpful assistant.";
+    sim.enable_thinking = false;
+    sim.user("Tell me about the ocean in a few sentences.");
+    auto *cmpl = sim.ctx.completion;
+    const llama_vocab *vocab = llama_model_get_vocab(sim.ctx.model);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
+    std::vector<llama_token> probe = sim.tokenize_like_loadprompt(
+        "The lighthouse keeper climbed the narrow stairs every evening to light the lamp.");
+    if (!probe.empty() && probe.front() == llama_vocab_bos(vocab)) probe.erase(probe.begin());
+
+    // Mean NLL of probe[1..] decoded on top of the current memory at n_past;
+    // keeps the first position's logits for a max-difference check
+    std::vector<float> first_logits;
+    auto score_from_state = [&]() -> double {
+        llama_batch b = llama_batch_init((int) probe.size(), 0, 1);
+        for (size_t i = 0; i < probe.size(); i++) {
+            b.token[i] = probe[i];
+            b.pos[i] = cmpl->n_past + (llama_pos) i;
+            b.n_seq_id[i] = 1;
+            b.seq_id[i][0] = 0;
+            b.logits[i] = true;
+        }
+        b.n_tokens = (int) probe.size();
+        const int rc = llama_decode(sim.ctx.ctx, b);
+        llama_batch_free(b);
+        if (rc != 0) return std::numeric_limits<double>::quiet_NaN();
+        const float *l0 = llama_get_logits_ith(sim.ctx.ctx, 0);
+        first_logits.assign(l0, l0 + n_vocab);
+        double nll = 0;
+        for (size_t i = 0; i + 1 < probe.size(); i++) {
+            const float *l = llama_get_logits_ith(sim.ctx.ctx, (int) i);
+            double mx = -1e30, se = 0;
+            for (int v = 0; v < n_vocab; v++) mx = std::max(mx, (double) l[v]);
+            for (int v = 0; v < n_vocab; v++) se += std::exp((double) l[v] - mx);
+            nll += -(((double) l[probe[i + 1]] - mx) - std::log(se));
+        }
+        return nll / (double) (probe.size() - 1);
+    };
+    // The same score from a cold decode of `tokens`
+    auto score_cold = [&](const std::vector<llama_token> &tokens) -> double {
+        sim.ctx.clearCache(false);
+        for (size_t pos = 0; pos < tokens.size(); pos += 512) {
+            const int n_eval = (int) std::min<size_t>(512, tokens.size() - pos);
+            std::vector<llama_token> chunk(tokens.begin() + pos, tokens.begin() + pos + n_eval);
+            if (llama_decode(sim.ctx.ctx, llama_batch_get_one(chunk.data(), n_eval))) {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+        cmpl->n_past = (llama_pos) tokens.size();
+        return score_from_state();
+    };
+
+    // Generate with MTP and stop from another thread while a decode runs, as
+    // stopCompletion does; retry if the stop lands between two decodes
+    bool aborted = false;
+    int attempts = 0, generated = 0;
+    for (; attempts < 10 && !aborted; attempts++) {
+        sim.ctx.clearCache(false);
+        sim.ctx.params.prompt = sim.render(/*add_generation_prompt*/ true);
+        sim.ctx.params.n_predict = 64;
+        cmpl->rewind();
+        cmpl->initSampling();
+        cmpl->beginCompletion();
+        cmpl->loadPrompt({});
+        std::atomic<int> n_tokens{0};
+        std::thread stopper([&]() {
+            while (n_tokens.load() < 4 + attempts) std::this_thread::sleep_for(std::chrono::microseconds(200));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2 + 3 * attempts));
+            cmpl->is_interrupted = true;
+        });
+        generated = 0;
+        while (cmpl->has_next_token && !cmpl->is_interrupted) {
+            auto o = cmpl->doCompletion();
+            if (o.tok != -1) n_tokens = ++generated;
+            if (cmpl->stopped_eos || cmpl->stopped_limit) n_tokens = 1 << 20;
+        }
+        n_tokens = 1 << 20;
+        stopper.join();
+        aborted = sim.ctx.decode_aborted.load();
+        cmpl->endCompletion();
+    }
+    if (!aborted) {
+        checks.push_back({key + tag + ": stop landed inside a decode", false,
+                          "no aborted decode in 10 attempts", false});
+        return checks;
+    }
+
+    const std::vector<llama_token> kept(cmpl->embd.begin(), cmpl->embd.begin() + std::max<llama_pos>(0, cmpl->n_past));
+    const double nll_state = score_from_state();
+    const std::vector<float> logits_state = first_logits;
+    const double nll_cold1 = score_cold(kept);
+    const std::vector<float> logits_cold = first_logits;
+    const double nll_cold2 = score_cold(kept);
+    const double floor = std::fabs(nll_cold1 - nll_cold2);
+    // Same tokens, same CPU path: a faithful state scores like the cold decode up
+    // to run-to-run noise. The wrong state seen on qwen35 moves the next-token
+    // logits by up to ~7.5 but the mean probe NLL by only ~0.005, below the reuse
+    // tests' 2% tolerance, so this check is tight and also bounds the logits.
+    const double tol = std::max(1e-3, 5.0 * floor);
+    const double d = std::fabs(nll_state - nll_cold1);
+    float max_dlogit = 0.f;
+    for (size_t v = 0; v < logits_state.size() && v < logits_cold.size(); v++) {
+        max_dlogit = std::max(max_dlogit, std::fabs(logits_state[v] - logits_cold[v]));
+    }
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), "after stop %.4f vs cold %.4f (d=%.4f, max|dlogit| %.3f), floor %.4f, "
+             "tol %.4f, kept %zu tokens, generated %d, attempt %d",
+             nll_state, nll_cold1, d, max_dlogit, floor, tol, kept.size(), generated, attempts);
+    std::cout << "    [mtp-abort] " << buf << "\n";
+    const bool valid = nll_state == nll_state && nll_cold1 == nll_cold1;
+    checks.push_back({key + tag + ": state after the stop matches the kept tokens",
+                      valid && d <= tol && max_dlogit <= 0.05f, buf, false});
+    return checks;
+}
+
 // Coherence dump: run a reuse-heavy conversation (appends, a regenerate, an
 // edit, a new session) with default cache settings and print every full reply,
 // so a human/judge can read the actual text produced through restored state.
@@ -2954,6 +3091,13 @@ int main(int argc, char **argv) {
             }
             continue;
         }
+        if (std::getenv("MTP_ABORT_ONLY") != nullptr) {
+            if (m.mtp) {
+                auto ma = run_mtp_abort_fidelity_test(m.key, p.string());
+                all.insert(all.end(), ma.begin(), ma.end());
+            }
+            continue;
+        }
         if (std::getenv("TRIM_ONLY") != nullptr) {
             auto tr = run_trim_roundtrip_probe(m.key, p.string());
             all.insert(all.end(), tr.begin(), tr.end());
@@ -2992,6 +3136,8 @@ int main(int argc, char **argv) {
         if (m.mtp && !std::getenv("SKIP_MTP") && !vision_only) {
             auto mtp_checks = run_model_mtp(m.key, p.string());
             all.insert(all.end(), mtp_checks.begin(), mtp_checks.end());
+            auto ma = run_mtp_abort_fidelity_test(m.key, p.string());
+            all.insert(all.end(), ma.begin(), ma.end());
         }
 
         // Exercise the multimodal prompt path when an mmproj and test images exist.

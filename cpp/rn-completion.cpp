@@ -610,7 +610,17 @@ void llama_rn_context_completion::loadPrompt(const std::vector<std::string> &med
         );
     } else {
         // Multimodal path - process all media paths
-        processMedia(parent_ctx->params.prompt, media_paths);
+        try {
+            processMedia(parent_ctx->params.prompt, media_paths);
+        } catch (const std::exception &) {
+            // An aborted chunk eval throws like a failed one. embd already holds
+            // the committed prefix (see rn-mtmd.hpp), so a stop just ends here.
+            if (!parent_ctx->abortRequested()) {
+                throw;
+            }
+            has_next_token = false;
+            return;
+        }
         num_prompt_tokens = embd.size();
         // Placeholder tokens are not vocab ids; no delimiter scan on media prompts.
         boundary_ckpts.clear();
@@ -677,6 +687,8 @@ void llama_rn_context_completion::beginCompletion(int chat_format, common_reason
     llama_perf_context_reset(parent_ctx->ctx);
     resetGenerationTimings();
     is_predicting = true;
+    parent_ctx->decode_aborted = false;
+    parent_ctx->completion_active = true;
 
     current_chat_format = chat_format;
     current_reasoning_format = reasoning_format;
@@ -687,12 +699,61 @@ void llama_rn_context_completion::beginCompletion(int chat_format, common_reason
 void llama_rn_context_completion::endCompletion() {
     generated_text += utf8_gate.finish();
     incomplete = false;
+    if (parent_ctx->decode_aborted.exchange(false)) {
+        recoverAfterAbortedDecode();
+    }
     // Trim the undecoded final token. On a stop-word / token-budget stop the last
     // sampled token is already pushed to embd but never decoded.
     if (n_past > 0 && n_past < (llama_pos) embd.size()) {
         embd.resize(n_past);
     }
     is_predicting = false;
+    parent_ctx->completion_active = false;
+}
+
+// After an aborted decode, llama_decode drops the aborted ubatch and the next
+// loadPrompt's seq_rm drops the rest, or fails and restores a checkpoint on
+// recurrent models. Rollback rows (n_rs_seq > 0, i.e. MTP) break that: the
+// post-abort seq_rm rolls back the whole ubatch through rows the aborted graph
+// was writing, reports success, and leaves a wrong state. Rewind to a snapshot
+// instead. Text-only: on M-RoPE models a token count is not a position.
+void llama_rn_context_completion::recoverAfterAbortedDecode() {
+    const bool rollback_rows = llama_n_rs_seq(parent_ctx->ctx) > 0 &&
+        (llama_model_is_recurrent(parent_ctx->model) || llama_model_is_hybrid(parent_ctx->model));
+    if (!rollback_rows) {
+        return;
+    }
+    if (n_past < 0) {
+        n_past = 0;
+    }
+    auto * mem = llama_get_memory(parent_ctx->ctx);
+    const size_t committed = std::min((size_t) n_past, embd.size());
+    const auto committed_end = embd.begin() + committed;
+    const char * clear_reason = nullptr;
+    int idx = -1;
+    if (!state_cache_enabled) {
+        clear_reason = "state cache off";
+    } else if (std::find(embd.begin(), committed_end, LLAMA_TOKEN_NULL) != committed_end) {
+        clear_reason = "media";
+    } else if ((idx = findStateCheckpoint(embd, committed)) < 0) {
+        clear_reason = "no checkpoint";
+    } else if (!restoreStateCheckpoint((size_t) idx)) {
+        clear_reason = "restore failed";
+    }
+
+    if (clear_reason == nullptr) {
+        const llama_pos k = (llama_pos) state_checkpoints[idx].n_tokens();
+        llama_memory_seq_rm(mem, 0, k, -1);
+        n_past = k;
+        embd.resize(k);
+        LOG_INFO("Decoding interrupted, restored state checkpoint, n_past: %d", n_past);
+        return;
+    }
+    llama_memory_clear(mem, false);
+    clearStateCheckpoints();
+    n_past = 0;
+    embd.clear();
+    LOG_INFO("Decoding interrupted, no usable state checkpoint (%s), cleared memory", clear_reason);
 }
 
 void llama_rn_context_completion::resetGenerationTimings() {
@@ -1494,12 +1555,14 @@ completion_token_output llama_rn_context_completion::nextToken()
         } else {
             if (llama_decode(parent_ctx->ctx, llama_batch_get_one(&embd[n_past], n_eval)))
             {
-                LOG_ERROR("failed to eval, n_eval: %d, n_past: %d, n_threads: %d, embd: %s",
-                    n_eval,
-                    n_past,
-                    parent_ctx->params.cpuparams.n_threads,
-                    tokens_to_str(parent_ctx->ctx, embd.cbegin() + n_past, embd.cend()).c_str()
-                );
+                if (!parent_ctx->abortRequested()) {
+                    LOG_ERROR("failed to eval, n_eval: %d, n_past: %d, n_threads: %d, embd: %s",
+                        n_eval,
+                        n_past,
+                        parent_ctx->params.cpuparams.n_threads,
+                        tokens_to_str(parent_ctx->ctx, embd.cbegin() + n_past, embd.cend()).c_str()
+                    );
+                }
                 // Trim embd to what the memory actually contains so a later prefix
                 // match can't claim never-written cells.
                 embd.resize(n_past);
@@ -1768,7 +1831,18 @@ size_t llama_rn_context_completion::findStoppingStrings(const std::string &text,
 
 completion_token_output llama_rn_context_completion::doCompletion()
 {
-    completion_token_output token_with_probs = nextToken();
+    completion_token_output token_with_probs;
+    try {
+        token_with_probs = nextToken();
+    } catch (const std::exception &) {
+        // An aborted decode in the MTP path throws like a failed one; on a stop
+        // it is a stop
+        if (!parent_ctx->abortRequested()) {
+            throw;
+        }
+        has_next_token = false;
+        token_with_probs.tok = -1;
+    }
 
     const std::string token_text = token_with_probs.tok == -1 ? "" : common_token_to_piece(parent_ctx->ctx, token_with_probs.tok);
     generated_text += utf8_gate.feed(token_text);

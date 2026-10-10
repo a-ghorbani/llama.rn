@@ -658,6 +658,10 @@ inline void llama_rn_context_mtmd::processMedia(
             );
             if (res != 0) {
                 mtmd_input_chunks_free(chunks);
+                // Memory holds this prompt up to n_past now: describe that, not the
+                // previous turn, so a later prefix match can't claim cells it lost
+                embd.assign(all_tokens.begin(), all_tokens.begin() + n_past);
+                bitmap_past_hashes_ref.clear();
                 throw std::runtime_error("Failed to evaluate chunks");
             }
             n_past = new_n_past;
