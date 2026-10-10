@@ -227,6 +227,27 @@ namespace rnllama_jsi {
         rnllama::llama_rn_context* ctx_;
     };
 
+    // Ends a completion on every exit, so a throw from the token loop does not
+    // leave the context marked as predicting
+    class CompletionScope {
+    public:
+        explicit CompletionScope(rnllama::llama_rn_context_completion* completion) : completion_(completion) {}
+        CompletionScope(const CompletionScope&) = delete;
+        CompletionScope& operator=(const CompletionScope&) = delete;
+
+        ~CompletionScope() {
+            if (completion_) completion_->endCompletion();
+        }
+
+        void end() {
+            completion_->endCompletion();
+            completion_ = nullptr;
+        }
+
+    private:
+        rnllama::llama_rn_context_completion* completion_;
+    };
+
     static void ensureBackendInitialized() {
         std::call_once(backend_init_once, []() {
             llama_backend_init();
@@ -550,7 +571,15 @@ namespace rnllama_jsi {
     // A task may still hold the context; it is destroyed only by its last owner
     // here, never under a running task.
     static void destroyWhenSoleOwner(ContextRef ctx) {
+        // A long wait means a task ignored the interrupt or a reference leaked;
+        // say so once instead of hanging silently
+        const auto warn_at = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        bool warned = false;
         while (ctx.use_count() > 1) {
+            if (!warned && std::chrono::steady_clock::now() >= warn_at) {
+                logError("releaseContext: still waiting for %ld other owner(s) of the context", (long) ctx.use_count() - 1);
+                warned = true;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         ctx.reset();
@@ -1202,71 +1231,67 @@ namespace rnllama_jsi {
 
                     size_t sent_count = 0;
 
-                    try {
-                        while (ctx->completion->has_next_token && !ctx->completion->is_interrupted) {
-                            const rnllama::completion_token_output token_with_probs = ctx->completion->doCompletion();
-                            if (token_with_probs.tok == -1 || ctx->completion->incomplete) {
-                                continue;
-                            }
+                    CompletionScope completionScope(ctx->completion);
+                    while (ctx->completion->has_next_token && !ctx->completion->is_interrupted) {
+                        const rnllama::completion_token_output token_with_probs = ctx->completion->doCompletion();
+                        if (token_with_probs.tok == -1 || ctx->completion->incomplete) {
+                            continue;
+                        }
 
-                            const std::string token_text = common_token_to_piece(ctx->ctx, token_with_probs.tok);
-                            size_t pos = std::min(sent_count, ctx->completion->generated_text.size());
-                            const std::string str_test = ctx->completion->generated_text.substr(pos);
+                        const std::string token_text = common_token_to_piece(ctx->ctx, token_with_probs.tok);
+                        size_t pos = std::min(sent_count, ctx->completion->generated_text.size());
+                        const std::string str_test = ctx->completion->generated_text.substr(pos);
 
-                            bool is_stop_full = false;
-                            size_t stop_pos = ctx->completion->findStoppingStrings(str_test, token_text.size(), rnllama::STOP_FULL);
-                            if (stop_pos != std::string::npos) {
-                                is_stop_full = true;
-                                ctx->completion->generated_text.erase(
-                                    ctx->completion->generated_text.begin() + pos + stop_pos,
-                                    ctx->completion->generated_text.end());
-                                pos = std::min(sent_count, ctx->completion->generated_text.size());
-                            } else {
-                                 stop_pos = ctx->completion->findStoppingStrings(str_test, token_text.size(), rnllama::STOP_PARTIAL);
-                            }
+                        bool is_stop_full = false;
+                        size_t stop_pos = ctx->completion->findStoppingStrings(str_test, token_text.size(), rnllama::STOP_FULL);
+                        if (stop_pos != std::string::npos) {
+                            is_stop_full = true;
+                            ctx->completion->generated_text.erase(
+                                ctx->completion->generated_text.begin() + pos + stop_pos,
+                                ctx->completion->generated_text.end());
+                            pos = std::min(sent_count, ctx->completion->generated_text.size());
+                        } else {
+                             stop_pos = ctx->completion->findStoppingStrings(str_test, token_text.size(), rnllama::STOP_PARTIAL);
+                        }
 
-                            if (stop_pos == std::string::npos || (!ctx->completion->has_next_token && !is_stop_full && stop_pos > 0)) {
-                                const std::string to_send = ctx->completion->generated_text.substr(pos, std::string::npos);
-                                sent_count += to_send.size();
+                        if (stop_pos == std::string::npos || (!ctx->completion->has_next_token && !is_stop_full && stop_pos > 0)) {
+                            const std::string to_send = ctx->completion->generated_text.substr(pos, std::string::npos);
+                            sent_count += to_send.size();
 
-                                if (emitPartial && onToken) {
-                                    rnllama::completion_token_output output_copy = token_with_probs;
-                                    output_copy.text = to_send;
+                            if (emitPartial && onToken) {
+                                rnllama::completion_token_output output_copy = token_with_probs;
+                                output_copy.text = to_send;
 
-                                    rnllama::completion_chat_output partial_output;
-                                    bool has_partial_output = false;
-                                    try {
-                                        partial_output = ctx->completion->parseChatOutput(true);
-                                        has_partial_output = true;
-                                    } catch (...) {
-                                        // ignore parse errors for partial output
+                                rnllama::completion_chat_output partial_output;
+                                bool has_partial_output = false;
+                                try {
+                                    partial_output = ctx->completion->parseChatOutput(true);
+                                    has_partial_output = true;
+                                } catch (...) {
+                                    // ignore parse errors for partial output
+                                }
+
+                                auto runtime = runtimePtr;
+                                if (runtime) {
+                                    json tokenResult = tokenResultJson(ctx.get(), output_copy);
+                                    if (has_partial_output) {
+                                        addChatOutputFields(tokenResult, partial_output);
                                     }
-
-                                    auto runtime = runtimePtr;
-                                    if (runtime) {
-                                        json tokenResult = tokenResultJson(ctx.get(), output_copy);
-                                        if (has_partial_output) {
-                                            addChatOutputFields(tokenResult, partial_output);
+                                    callInvoker->invokeAsync([onToken, tokenResult, contextId, runtime]() {
+                                        // Skip the callback if the context was released meanwhile
+                                        if (!g_llamaContexts.get(contextId)) {
+                                            return;
                                         }
-                                        callInvoker->invokeAsync([onToken, tokenResult, contextId, runtime]() {
-                                            // Skip the callback if the context was released meanwhile
-                                            if (!g_llamaContexts.get(contextId)) {
-                                                return;
-                                            }
-                                            auto& rt = *runtime;
-                                            onToken->call(rt, fromJson(rt, tokenResult));
-                                        });
-                                    }
+                                        auto& rt = *runtime;
+                                        onToken->call(rt, fromJson(rt, tokenResult));
+                                    });
                                 }
                             }
                         }
-                    } catch (...) {
-                        ctx->completion->endCompletion();
-                        throw;
                     }
 
                     common_perf_print(ctx->ctx, ctx->completion->ctx_sampling);
-                    ctx->completion->endCompletion();
+                    completionScope.end();
 
                     // Snapshot the result here, before another task can touch the context
                     CompletionResult result = completionResult(ctx.get());
