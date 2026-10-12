@@ -492,6 +492,48 @@ bool test_context_init_failure_is_graceful() {
 }
 
 // Test utility functions
+// bench() clears the memory to measure from a cold cache. The completion's
+// view of the cache (embd / n_past) must be reset with it, otherwise the next
+// prompt prefix-matches against tokens the memory no longer holds.
+bool test_bench_resets_completion_cache() {
+    try {
+        llama_rn_context ctx;
+        if (!setup_completion_context(ctx)) return false;
+
+        const std::string prompt = "The quick brown fox jumps over the lazy dog";
+        if (run_classic_completion(ctx, prompt, 4) <= 0) {
+            std::cout << "Completion before bench generated no tokens" << std::endl;
+            return false;
+        }
+
+        const json bench = ctx.completion->bench(8, 4, 1, 1);
+        if (bench.empty()) {
+            std::cout << "bench() after a completion returned no result" << std::endl;
+            return false;
+        }
+
+        std::vector<std::string> empty_media;
+        ctx.completion->rewind();
+        if (!ctx.completion->initSampling()) return false;
+        ctx.params.prompt = prompt;
+        ctx.completion->loadPrompt(empty_media);
+
+        const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx.ctx), 0);
+        if (ctx.completion->n_past != pos_max + 1) {
+            std::cout << "Prompt claims " << ctx.completion->n_past << " cached tokens, memory holds "
+                      << pos_max + 1 << std::endl;
+            return false;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        std::cout << "Exception: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cout << "Unknown exception" << std::endl;
+        return false;
+    }
+}
+
 bool test_utilities() {
     try {
         // Test kv_cache_type_from_str function
@@ -553,6 +595,7 @@ int main() {
     results.run_test("Completion Probabilities Reset Between Completions", test_completion_probabilities_reset_between_completions());
     results.run_test("Logit Bias Forces Token", test_logit_bias_forces_token());
     results.run_test("n_probs Post-Sampling vs Raw", test_n_probs_post_sampling_vs_raw());
+    results.run_test("Bench Resets Completion Cache", test_bench_resets_completion_cache());
     results.run_test("Graceful Context Init Failure", test_context_init_failure_is_graceful());
     results.run_test("Utility Functions", test_utilities());
 
