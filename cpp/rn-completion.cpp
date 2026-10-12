@@ -1926,10 +1926,11 @@ std::vector<float> llama_rn_context_completion::rerank(const std::string &query,
             scores.push_back(-1e6f);
         }
         endCompletion();
-
-        // Clear KV cache again to prepare for next document or restore original state
-        llama_memory_clear(llama_get_memory(parent_ctx->ctx), false);
     }
+
+    // The last document is in memory and embd; drop both so a later completion
+    // on this context does not prefix-match against it.
+    parent_ctx->clearCache(false);
 
     return scores;
 }
@@ -2011,6 +2012,11 @@ json llama_rn_context_completion::bench(int pp, int tg, int pl, int nr) {
 
         return true;
     };
+
+    // Start from an empty cache: the warmup decodes at position 0, which an earlier
+    // completion's sequence would reject. clearCache() also resets embd / n_past,
+    // so no later prompt prefix-matches against what the bench wipes.
+    parent_ctx->clearCache(false);
 
     // warm up like the CLI benchmark
     llama_batch_clear(&batch);
@@ -2118,7 +2124,7 @@ json llama_rn_context_completion::bench(int pp, int tg, int pl, int nr) {
         ++runs_completed;
     }
 
-    llama_memory_clear(mem, false);
+    parent_ctx->clearCache(false);
 
     const double divisor = runs_completed > 0 ? static_cast<double>(runs_completed) : 1.0;
 
