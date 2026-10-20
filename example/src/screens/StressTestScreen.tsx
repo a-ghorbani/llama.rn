@@ -30,6 +30,12 @@ import {
   formatStressTestReport,
   isRaceConditionError,
 } from '../features/stressTestHelpers'
+import {
+  releaseDuringPrefill,
+  stopDuringFormatting,
+  stopDuringPrefill,
+  type LifecycleOptions,
+} from '../features/lifecycleTests'
 
 const LLM_MODELS = Object.entries(MODELS).filter(([_key, model]) => {
   const modelWithExtras = model as typeof model & {
@@ -78,6 +84,7 @@ export default function StressTestScreen({ navigation }: { navigation: any }) {
     path: string
   } | null>(null)
   const [iterations, setIterations] = useState(5) // Unified iteration count for all tests
+  const [lifecycleThreads, setLifecycleThreads] = useState(1)
 
   const contextRef = useRef<LlamaContext | null>(null)
   const logInputRef = useRef<TextInput>(null)
@@ -956,6 +963,30 @@ export default function StressTestScreen({ navigation }: { navigation: any }) {
     }
   }
 
+  // Lifecycle tests run one at a time: on a broken build a release test
+  // crashes the app, so each result is also logged to the console (logcat).
+  const runLifecycleTest = async (
+    name: string,
+    testFn: (options: LifecycleOptions) => Promise<void>,
+  ) => {
+    if (!modelInfo || isTesting) return
+    setIsTesting(true)
+    clearLogs()
+    const log = (message: string) => {
+      console.log(`[lifecycle] ${name}: ${message}`)
+      addLog(message)
+    }
+    log(`=== ${name} (model: ${modelInfo.name}) ===`)
+    try {
+      await testFn({ modelPath: modelInfo.path, threads: lifecycleThreads, log })
+      log('=== done ===')
+    } catch (error: any) {
+      log(`=== failed: ${error?.message ?? String(error)} ===`)
+    } finally {
+      setIsTesting(false)
+    }
+  }
+
   const getStatusEmoji = (result: TestResult) => {
     if (result.status === 'passed' && (result.raceConditionsCaught ?? 0) > 0) {
       return '⚠️' // Passed but caught race conditions
@@ -1042,6 +1073,39 @@ export default function StressTestScreen({ navigation }: { navigation: any }) {
               {isTesting ? 'Running...' : 'Run Tests'}
             </Text>
           </TouchableOpacity>
+        </View>
+        {/* Stop and release during a long prompt (CPU, one batch) */}
+        <View style={styles.iterationsRow}>
+          <Text style={{ color: theme.colors.text }}>Lifecycle threads:</Text>
+          {[1, 4].map((threads) => (
+            <TouchableOpacity
+              key={threads}
+              style={[
+                styles.logButton,
+                lifecycleThreads === threads && styles.lifecycleThreadsSelected,
+              ]}
+              onPress={() => setLifecycleThreads(threads)}
+              disabled={isTesting}
+            >
+              <Text style={styles.logButtonText}>{threads}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <View style={styles.testButtonContainer}>
+          {[
+            { name: 'Release During Prefill', fn: releaseDuringPrefill },
+            { name: 'Stop During Prefill', fn: stopDuringPrefill },
+            { name: 'Stop During Formatting', fn: stopDuringFormatting },
+          ].map(({ name, fn }) => (
+            <TouchableOpacity
+              key={name}
+              style={[styles.testButton, isTesting && styles.testButtonDisabled]}
+              onPress={() => runLifecycleTest(name, fn)}
+              disabled={isTesting}
+            >
+              <Text style={styles.testButtonText}>{name}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
         {isTesting && (
           <Text style={styles.testingHint}>
@@ -1234,6 +1298,10 @@ function createStyles(
       color: theme.colors.text,
       fontSize: 14,
       fontWeight: '600' as const,
+    },
+    lifecycleThreadsSelected: {
+      borderWidth: 2,
+      borderColor: theme.colors.primary,
     },
     iterationsRow: {
       flexDirection: 'row' as const,
