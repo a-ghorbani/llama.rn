@@ -33,8 +33,8 @@ public class RNLlama {
   private static final Pattern QUALCOMM_HINT_PATTERN =
     Pattern.compile("(adreno|qcom|qualcomm|snapdragon)", Pattern.CASE_INSENSITIVE);
   private static final Pattern KNOWN_HEXAGON_SOC_PATTERN =
-    Pattern.compile("\\b(SM8450|SM8550|SM8635|SM8650|SM8750|SM8845|SM8850)\\b");
-  private static final Pattern SNAPDRAGON_8_SERIES_SOC_PATTERN = Pattern.compile("\\bSM8\\d{3}\\b");
+    Pattern.compile("\\b(SM8450|SM8550|SM8635|SM8650|SM8750|SM8845|SM8850)[A-Z]?\\b");
+  private static final Pattern SNAPDRAGON_8_SERIES_SOC_PATTERN = Pattern.compile("\\bSM8\\d{3}[A-Z]?\\b");
   private static final Pattern SNAPDRAGON_8_SERIES_NAME_PATTERN =
     Pattern.compile("SNAPDRAGON\\s*8");
   private static final Pattern HEXAGON_CODENAME_PATTERN =
