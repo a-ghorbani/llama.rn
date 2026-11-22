@@ -1,0 +1,125 @@
+Two changes to ggml-opencl.cpp:
+
+1. Lazy init in the buffer type. The OpenCL buffer type reads dev_ctx->backend_ctx in
+get_alignment / get_max_size, which is only set once a backend (or alloc_buffer) has run
+ggml_cl_init. mtmd now allocates the mmproj tensors from ggml_backend_dev_buffer_type()
+before creating a backend (mtmd-model.cpp), which crashed on Adreno with a null backend_ctx.
+
+2. Build the q3_k, q2_0, iq4_xs, iq1_s, iq1_m, iq3_s, iq3_xxs, iq2_s, iq2_xs and iq2_xxs
+_q8_1_dp4a programs only when the device has cl_khr_integer_dot_product, like the other
+dp4a programs in load_cl_kernels. On Adreno drivers without it (Adreno 630, Adreno 730 on
+Snapdragon 8 Gen 1 / 8+ Gen 1) the build fails and build_program_from_source calls exit(1),
+so the app dies on GPU init. Every dispatch site of these kernels already returns false
+when has_integer_dot is unset, so the matmul falls back to the non-dp4a path.
+scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an ungated one.
+--- a/ggml/src/ggml-opencl/ggml-opencl.cpp
++++ b/ggml/src/ggml-opencl/ggml-opencl.cpp
+@@ -5151,7 +5151,7 @@
+     }
+ 
+     // gemm_noshuffle_q3_k_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_q3_k_q8_1_dp4a.cl.h"
+@@ -5169,7 +5169,7 @@
+     }
+ 
+     // gemm_noshuffle_q2_0_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_q2_0_q8_1_dp4a.cl.h"
+@@ -5187,7 +5187,7 @@
+     }
+ 
+     // gemm_noshuffle_iq4_xs_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_iq4_xs_q8_1_dp4a.cl.h"
+@@ -5309,7 +5309,7 @@
+     }
+ 
+     // gemm_noshuffle_iq1_s_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_iq1_s_q8_1_dp4a.cl.h"
+@@ -5396,7 +5396,7 @@
+     }
+ 
+     // gemm_noshuffle_iq1_m_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_iq1_m_q8_1_dp4a.cl.h"
+@@ -5464,7 +5464,7 @@
+     }
+ 
+     // gemm_noshuffle_iq3_s_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_iq3_s_q8_1_dp4a.cl.h"
+@@ -5551,7 +5551,7 @@
+     }
+ 
+     // gemm_noshuffle_iq3_xxs_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_iq3_xxs_q8_1_dp4a.cl.h"
+@@ -5638,7 +5638,7 @@
+     }
+ 
+     // gemm_noshuffle_iq2_s_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_iq2_s_q8_1_dp4a.cl.h"
+@@ -5656,7 +5656,7 @@
+     }
+ 
+     // gemm_noshuffle_iq2_xs_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_iq2_xs_q8_1_dp4a.cl.h"
+@@ -5674,7 +5674,7 @@
+     }
+ 
+     // gemm_noshuffle_iq2_xxs_q8_1_dp4a
+-    {
++    if (backend_ctx->has_integer_dot) {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+         const std::string kernel_src {
+             #include "gemm_noshuffle_iq2_xxs_q8_1_dp4a.cl.h"
+@@ -17706,15 +17706,14 @@
+ }
+ 
+ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_type_t buffer_type) {
+-    ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
+-    return dev_ctx->backend_ctx->alignment;
++    // init lazily like alloc_buffer: the buffer type may be used before any backend exists on the device
++    return ggml_cl_init(buffer_type->device)->alignment;
+ }
+ 
+ static size_t ggml_backend_opencl_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
+     static size_t max_size = -1;
+     if (max_size == (size_t)-1) {
+-        ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
+-        max_size = dev_ctx->backend_ctx->max_alloc_size;
++        max_size = ggml_cl_init(buffer_type->device)->max_alloc_size;
+     }
+     return max_size;
+ }
