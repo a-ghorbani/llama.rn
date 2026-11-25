@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-hexagon/ggml-hexagon.cpp
 +++ b/ggml/src/ggml-hexagon/ggml-hexagon.cpp
-@@ -895,8 +895,12 @@
+@@ -918,8 +918,12 @@
          return nullptr;
      }
      try {
@@ -15,7 +15,7 @@
      } catch (const std::exception & exc) {
          GGML_LOG_ERROR("ggml-hex: %s failed to allocate device buffer context: %s\n", dev_ctx->c_name(), exc.what());
          return nullptr;
-@@ -913,8 +917,12 @@
+@@ -936,8 +940,12 @@
          return nullptr;
      }
      try {
@@ -30,7 +30,7 @@
      } catch (const std::exception & exc) {
          GGML_LOG_ERROR("ggml-hex: %s failed to allocate host buffer context: %s\n", dev_ctx->c_name(), exc.what());
          return nullptr;
-@@ -3130,6 +3138,24 @@
+@@ -3201,6 +3209,24 @@
          devices[i].context = new ggml_backend_hexagon_device_context(i, opt_device_configs[i], &devices[i]);
      }
  
@@ -55,3 +55,17 @@
  }
  
  ggml_hexagon_registry::~ggml_hexagon_registry() {
+@@ -3567,8 +3593,11 @@
+             opt_arch = 73;
+         } else {
+             if (opt_arch < 73) {
+-                GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is under supported range, capping at v73\n", opt_arch);
+-                opt_arch = 73;
++                // llama.rn: an older DSP can't run the v73+ skels, so report no devices instead of capping at v73
++                GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is under supported range (v73+), no HTP devices\n", opt_arch);
++                opt_ndev     = 0;
++                reg->context = new ggml_hexagon_registry(reg);
++                return;
+             } else if (opt_arch > 85) {
+                 GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is over supported range, capping at v85\n", opt_arch);
+                 opt_arch = 85;

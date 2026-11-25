@@ -3593,8 +3593,11 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
             opt_arch = 73;
         } else {
             if (opt_arch < 73) {
-                GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is under supported range, capping at v73\n", opt_arch);
-                opt_arch = 73;
+                // llama.rn: an older DSP can't run the v73+ skels, so report no devices instead of capping at v73
+                GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is under supported range (v73+), no HTP devices\n", opt_arch);
+                opt_ndev     = 0;
+                reg->context = new ggml_hexagon_registry(reg);
+                return;
             } else if (opt_arch > 85) {
                 GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is over supported range, capping at v85\n", opt_arch);
                 opt_arch = 85;
