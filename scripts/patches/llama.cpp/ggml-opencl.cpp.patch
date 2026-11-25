@@ -1,4 +1,4 @@
-Two changes to ggml-opencl.cpp:
+Three changes to ggml-opencl.cpp:
 
 1. Lazy init in the buffer type. The OpenCL buffer type reads dev_ctx->backend_ctx in
 get_alignment / get_max_size, which is only set once a backend (or alloc_buffer) has run
@@ -12,9 +12,35 @@ Snapdragon 8 Gen 1 / 8+ Gen 1) the build fails and build_program_from_source cal
 so the app dies on GPU init. Every dispatch site of these kernels already returns false
 when has_integer_dot is unset, so the matmul falls back to the non-dp4a path.
 scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an ungated one.
+
+3. Decide GGML_OPENCL_ADRENO_USE_LARGE_BUFFER in ggml_cl_init, before kernel_compile_opts is
+built: use it only when the device lists cl_qcom_large_buffer and a trivial kernel builds
+with -qcom-enable-large-buffer. Upstream clears the flag later, in
+ggml_opencl_print_backend_info, but kernel_compile_opts was already built with the option
+and is never rebuilt. On a driver that rejects the option (Adreno 630: err -43,
+"Unsupported OpenCL user option specified") every kernel build fails and the app exits.
 --- a/ggml/src/ggml-opencl/ggml-opencl.cpp
 +++ b/ggml/src/ggml-opencl/ggml-opencl.cpp
-@@ -5151,7 +5151,7 @@
+@@ -1969,6 +1969,18 @@
+     return compile_opts;
+ }
+ 
++static bool ggml_opencl_compiler_accepts(cl_context ctx, cl_device_id dev, const std::string & compile_opts) {
++    const char * src = "kernel void k(global int * a) { a[0] = 0; }";
++    cl_int err;
++    cl_program p = clCreateProgramWithSource(ctx, 1, &src, NULL, &err);
++    if (err != CL_SUCCESS) {
++        return false;
++    }
++    err = clBuildProgram(p, 1, &dev, compile_opts.c_str(), NULL, NULL);
++    clReleaseProgram(p);
++    return err == CL_SUCCESS;
++}
++
+ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
+     if (backend_ctx->kernels_loaded) {
+         return;
+@@ -5151,7 +5163,7 @@
      }
  
      // gemm_noshuffle_q3_k_q8_1_dp4a
@@ -23,7 +49,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_q3_k_q8_1_dp4a.cl.h"
-@@ -5169,7 +5169,7 @@
+@@ -5169,7 +5181,7 @@
      }
  
      // gemm_noshuffle_q2_0_q8_1_dp4a
@@ -32,7 +58,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_q2_0_q8_1_dp4a.cl.h"
-@@ -5187,7 +5187,7 @@
+@@ -5187,7 +5199,7 @@
      }
  
      // gemm_noshuffle_iq4_xs_q8_1_dp4a
@@ -41,7 +67,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_iq4_xs_q8_1_dp4a.cl.h"
-@@ -5309,7 +5309,7 @@
+@@ -5309,7 +5321,7 @@
      }
  
      // gemm_noshuffle_iq1_s_q8_1_dp4a
@@ -50,7 +76,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_iq1_s_q8_1_dp4a.cl.h"
-@@ -5396,7 +5396,7 @@
+@@ -5396,7 +5408,7 @@
      }
  
      // gemm_noshuffle_iq1_m_q8_1_dp4a
@@ -59,7 +85,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_iq1_m_q8_1_dp4a.cl.h"
-@@ -5464,7 +5464,7 @@
+@@ -5464,7 +5476,7 @@
      }
  
      // gemm_noshuffle_iq3_s_q8_1_dp4a
@@ -68,7 +94,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_iq3_s_q8_1_dp4a.cl.h"
-@@ -5551,7 +5551,7 @@
+@@ -5551,7 +5563,7 @@
      }
  
      // gemm_noshuffle_iq3_xxs_q8_1_dp4a
@@ -77,7 +103,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_iq3_xxs_q8_1_dp4a.cl.h"
-@@ -5638,7 +5638,7 @@
+@@ -5638,7 +5650,7 @@
      }
  
      // gemm_noshuffle_iq2_s_q8_1_dp4a
@@ -86,7 +112,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_iq2_s_q8_1_dp4a.cl.h"
-@@ -5656,7 +5656,7 @@
+@@ -5656,7 +5668,7 @@
      }
  
      // gemm_noshuffle_iq2_xs_q8_1_dp4a
@@ -95,7 +121,7 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_iq2_xs_q8_1_dp4a.cl.h"
-@@ -5674,7 +5674,7 @@
+@@ -5674,7 +5686,7 @@
      }
  
      // gemm_noshuffle_iq2_xxs_q8_1_dp4a
@@ -104,7 +130,40 @@ scripts/__tests__/opencl-integer-dot-gate.test.ts fails when a sync adds an unga
  #ifdef GGML_OPENCL_EMBED_KERNELS
          const std::string kernel_src {
              #include "gemm_noshuffle_iq2_xxs_q8_1_dp4a.cl.h"
-@@ -17706,15 +17706,14 @@
+@@ -9059,12 +9071,7 @@
+ #endif // GGML_OPENCL_USE_ADRENO_KERNELS
+ 
+     if (backend_ctx->adreno_use_large_buffer) {
+-        if (!backend_ctx->adreno_has_large_buffer) {
+-            GGML_LOG_INFO("ggml_opencl: Adreno large buffer requested but not supported by driver, will use regular buffer\n");
+-            backend_ctx->adreno_use_large_buffer = false;
+-        } else {
+-            GGML_LOG_INFO("ggml_opencl: Adreno large buffer enabled\n");
+-        }
++        GGML_LOG_INFO("ggml_opencl: Adreno large buffer enabled\n");
+     }
+ 
+     if (dev_ctx->opfilter) {
+@@ -9287,8 +9294,18 @@
+ #endif
+ 
+     // determine whether to use large buffer for Adreno
++    // decided before kernel_compile_opts is built, since a kernel build failure is fatal
+     backend_ctx->adreno_use_large_buffer = getenv("GGML_OPENCL_ADRENO_USE_LARGE_BUFFER") != nullptr &&
+                                            backend_ctx->gpu_family == GPU_FAMILY::ADRENO;
++    if (backend_ctx->adreno_use_large_buffer) {
++        if (!backend_ctx->adreno_has_large_buffer) {
++            GGML_LOG_INFO("ggml_opencl: Adreno large buffer requested but not supported by driver, will use regular buffer\n");
++            backend_ctx->adreno_use_large_buffer = false;
++        } else if (!ggml_opencl_compiler_accepts(dev_ctx->context, device, ggml_opencl_make_compile_opts(backend_ctx.get()))) {
++            GGML_LOG_INFO("ggml_opencl: Adreno large buffer requested but the compiler rejects -qcom-enable-large-buffer, will use regular buffer\n");
++            backend_ctx->adreno_use_large_buffer = false;
++        }
++    }
+ 
+     backend_ctx->kernel_compile_opts = ggml_opencl_make_compile_opts(backend_ctx.get());
+     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS,
+@@ -17706,15 +17723,14 @@
  }
  
  static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_type_t buffer_type) {

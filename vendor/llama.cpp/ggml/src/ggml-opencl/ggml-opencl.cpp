@@ -1969,6 +1969,18 @@ static std::string ggml_opencl_make_compile_opts(const ggml_backend_opencl_conte
     return compile_opts;
 }
 
+static bool ggml_opencl_compiler_accepts(cl_context ctx, cl_device_id dev, const std::string & compile_opts) {
+    const char * src = "kernel void k(global int * a) { a[0] = 0; }";
+    cl_int err;
+    cl_program p = clCreateProgramWithSource(ctx, 1, &src, NULL, &err);
+    if (err != CL_SUCCESS) {
+        return false;
+    }
+    err = clBuildProgram(p, 1, &dev, compile_opts.c_str(), NULL, NULL);
+    clReleaseProgram(p);
+    return err == CL_SUCCESS;
+}
+
 static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     if (backend_ctx->kernels_loaded) {
         return;
@@ -9059,12 +9071,7 @@ static void ggml_opencl_print_backend_info(ggml_backend_opencl_device_context * 
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
     if (backend_ctx->adreno_use_large_buffer) {
-        if (!backend_ctx->adreno_has_large_buffer) {
-            GGML_LOG_INFO("ggml_opencl: Adreno large buffer requested but not supported by driver, will use regular buffer\n");
-            backend_ctx->adreno_use_large_buffer = false;
-        } else {
-            GGML_LOG_INFO("ggml_opencl: Adreno large buffer enabled\n");
-        }
+        GGML_LOG_INFO("ggml_opencl: Adreno large buffer enabled\n");
     }
 
     if (dev_ctx->opfilter) {
@@ -9287,8 +9294,18 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
 #endif
 
     // determine whether to use large buffer for Adreno
+    // decided before kernel_compile_opts is built, since a kernel build failure is fatal
     backend_ctx->adreno_use_large_buffer = getenv("GGML_OPENCL_ADRENO_USE_LARGE_BUFFER") != nullptr &&
                                            backend_ctx->gpu_family == GPU_FAMILY::ADRENO;
+    if (backend_ctx->adreno_use_large_buffer) {
+        if (!backend_ctx->adreno_has_large_buffer) {
+            GGML_LOG_INFO("ggml_opencl: Adreno large buffer requested but not supported by driver, will use regular buffer\n");
+            backend_ctx->adreno_use_large_buffer = false;
+        } else if (!ggml_opencl_compiler_accepts(dev_ctx->context, device, ggml_opencl_make_compile_opts(backend_ctx.get()))) {
+            GGML_LOG_INFO("ggml_opencl: Adreno large buffer requested but the compiler rejects -qcom-enable-large-buffer, will use regular buffer\n");
+            backend_ctx->adreno_use_large_buffer = false;
+        }
+    }
 
     backend_ctx->kernel_compile_opts = ggml_opencl_make_compile_opts(backend_ctx.get());
     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS,
